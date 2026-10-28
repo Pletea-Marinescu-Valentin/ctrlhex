@@ -1,0 +1,20 @@
+ceiling_no_range.txt:wait                                   max tilt    0.1 deg | max height  0.00 m | now -0.05 m | LOITER armed=False
+ceiling_no_range.txt:stabilized                             max tilt    0.1 deg | max height  0.00 m | now -0.04 m | STABILIZED armed=False
+ceiling_no_range.txt:arm                                    max tilt    0.1 deg | max height  0.00 m | now -0.04 m | STABILIZED armed=True
+ceiling_no_range.txt:armed on the ground, throttle 0        max tilt    0.1 deg | max height  0.00 m | now -0.04 m | STABILIZED armed=True
+ceiling_no_range.txt:throttle 70% for 10 s                  max tilt    0.1 deg | max height  1.22 m | now  1.21 m | STABILIZED armed=True
+ceiling_no_range.txt:throttle 100% for 6 s                  max tilt    0.0 deg | max height  1.22 m | now  1.21 m | STABILIZED armed=True
+ceiling_no_range.txt:throttle 100% + full forward 4 s       max tilt   20.0 deg | max height  1.23 m | now  1.22 m | STABILIZED armed=True
+ceiling_no_range.txt:throttle 40% (descend) 4 s             max tilt   20.0 deg | max height  1.24 m | now  1.21 m | STABILIZED armed=True
+ceiling_no_range.txt:throttle 100% again 5 s                max tilt    0.0 deg | max height  1.21 m | now  1.16 m | STABILIZED armed=True
+ceiling_no_range.txt:[55.7] Landing detected	
+ceiling_no_range.txt:throttle 0 (land) 8 s                  max tilt    0.8 deg | max height  1.16 m | now -0.03 m | STABILIZED armed=False
+geofence_no_range.txt:wait                                   max tilt    0.1 deg | max height  0.00 m | now -0.05 m | LOITER armed=False
+geofence_no_range.txt:stabilized                             max tilt    0.1 deg | max height  0.00 m | now -0.04 m | STABILIZED armed=False
+geofence_no_range.txt:arm                                    max tilt    0.1 deg | max height  0.00 m | now -0.04 m | STABILIZED armed=True
+geofence_no_range.txt:armed on the ground, throttle 0        max tilt    0.1 deg | max height  0.00 m | now -0.04 m | STABILIZED armed=True
+geofence_no_range.txt:[27.1] Geofence: exceeding maximum altitude above Home
+geofence_no_range.txt:throttle 100% 6 s                      max tilt    0.1 deg | max height 68.08 m | now 67.65 m | UNKNOWN armed=True
+geofence_no_range.txt:sticks + full throttle during Land 6 s max tilt    0.0 deg | max height 67.62 m | now 64.13 m | UNKNOWN armed=True
+geofence_no_range.txt:mode switch flips during Land 6 s      max tilt    0.0 deg | max height 64.10 m | now 60.63 m | UNKNOWN armed=True
+geofence_no_range.txt:wait 6 s                               max tilt    0.0 deg | max height 60.60 m | now 57.15 m | UNKNOWN armed=True

@@ -1,11 +1,13 @@
-function T = restore_simulation(vehicle, saveFigures)
+function [T, Rstep, Rgrad, S] = restore_simulation(vehicle, saveFigures)
 % Hexacopter X with motor 1 stopped at 2 s and released at 7 s: PX4 one-step restore versus the gradual
 % restore (CA_RESTORE_SPIN, CA_RESTORE_TIME). Rigid body with 6 DOF, motors with dead time and time
 % constant, PX4 attitude/rate cascade, PX4 pseudo-inverse allocation with sequential desaturation,
 % opposite rotor reversible (CA_FAILURE_MODE 2).
 %   T = restore_simulation('demonstrator')
 %   T = restore_simulation('small')
-% Measured on the vehicles: hover command and rate gains. Mass, arm, inertia and motor times are estimates.
+%   [T, Rstep, Rgrad, S] = restore_simulation(...)   also the trajectories and the scenario timing
+% From the flight logs: hover command, attitude and rate gains, gyro filter, idle command.
+% Mass, arm, inertia and motor times are estimates.
 
 if nargin < 1, vehicle = 'demonstrator'; end
 if nargin < 2, saveFigures = true; end
@@ -18,21 +20,21 @@ switch vehicle
         figTitle = 'Large hexacopter simulation';
     case 'small'                        % KOKO 1505 3450KV, 4" propellers, 3S
         D.m = 0.70; D.L = 0.12; D.J = diag([0.0035 0.0035 0.0060]); D.kq = 0.012;
-        D.tauM = 0.035; D.tStart = 0.12; D.hover = 0.31;
-        C.rateK = [0.35 0.40 1.0]; C.rateI = [0.20 0.20 0.10]; C.intLim = [0.3 0.3 0.3];
+        D.tauM = 0.035; D.tStart = 0.12; D.hover = 0.34;
+        C.rateK = [0.35 0.40 1.2]; C.rateI = [0.20 0.20 0.10]; C.intLim = [0.3 0.3 0.3];
         figTitle = 'Small hexacopter simulation';
     otherwise
         error('vehicle must be ''demonstrator'' or ''small''');
 end
 D.rev   = 0.4;                          % CA_REV_THR_FRAC
-D.idle  = 0.02;                         % DSHOT_MIN
+D.idle  = 0.055;                        % DSHOT_MIN
 D.Tmax  = D.m * 9.81 / (6 * D.hover);
 % asymmetries of a real vehicle; without them the model is symmetric and the restore kick vanishes
 D.cg    = [0.004; -0.006; 0];
 D.dT    = [0.03 -0.02 0.01 -0.03 0.02 -0.01]';
 D.noise = deg2rad(0.3);
 
-C.attP  = [6.5 6.5 2.8];
+C.attP  = [4.0 4.0 2.8];               % MC_ROLL_P, MC_PITCH_P, MC_YAW_P
 C.rateP = [0.15 0.15 0.20];
 C.rateD = [0.003 0.003 0];
 C.rateMax = deg2rad([220 220 200]);
@@ -132,7 +134,7 @@ p = [0; 0; -S.h0]; v = zeros(3, 1); q = [1; 0; 0; 0]; w = zeros(3, 1);
 uAct = D.hover * ones(6, 1); tStart = NaN(6, 1);
 rateInt = zeros(3, 1); zInt = 0; wF = w; wFPrev = w;
 rng(7);
-aGyro = 2 * pi * 40 * dt / (1 + 2 * pi * 40 * dt);       % IMU_GYRO_CUTOFF 40 Hz
+aGyro = 2 * pi * 80 * dt / (1 + 2 * pi * 80 * dt);       % IMU_GYRO_CUTOFF 80 Hz
 active = true(6, 1); reversible = false(6, 1);
 sRest = 1; restoring = false; tLastUpdate = -1;
 

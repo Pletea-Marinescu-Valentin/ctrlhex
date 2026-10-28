@@ -1,0 +1,3 @@
+baseline_landing_fast.ulg    max tilt after the stop  178.8 deg | [commander] Landing detected; [health_and_arming_checks] Preflight Fail: Attitude failure (roll); [health_and_arming_checks] Preflight Fail: Attitude failure (roll)
+baseline_landing_nominal.ulg max tilt after the stop  177.6 deg | [commander] Landing detected; [health_and_arming_checks] Preflight Fail: Attitude failure (roll)
+baseline_landing_slow.ulg    max tilt after the stop  170.5 deg | [commander] Landing detected; [health_and_arming_checks] Preflight Fail: Attitude failure (roll)

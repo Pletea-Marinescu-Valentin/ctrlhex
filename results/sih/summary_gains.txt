@@ -1,0 +1,10 @@
+run                    | roll step: rise/over/settle | pitch step: rise/over/settle | yaw rate: rise/over | wind: max/end   | motor 1 off: att/dz/dxy  | roll step on 5 motors | sat%
+gains_board_nominal    |  0.38s   0.0%  0.52s     |  0.40s   0.0%  0.52s     |  0.22s  23.5%     | 0.82m 0.71m     |   0.3deg 0.02m 0.06m   |  0.29s   1.4% 0.84s |  0.0
+gains_board_fast       |  0.43s   0.0%  0.57s     |  0.44s   0.0%  0.57s     |  0.13s  52.1%     | 0.95m 0.95m     |  17.6deg 0.06m 0.57m   |  0.48s  23.8% 2.44s |  0.0
+gains_board_slow       |  0.30s   3.8%  0.44s     |  0.31s   1.5%  0.44s     |  0.40s   9.9%     | 0.64m 0.23m     |   0.6deg 0.02m 0.09m   |  0.42s   0.0% 2.36s |  0.0
+gains_px4_nominal      |  0.47s   0.0%  0.58s     |  0.47s   0.0%  0.57s     |  0.25s  19.7%     | 0.85m 0.69m     |   0.2deg 0.02m 0.11m   |  0.37s   0.8% 0.53s |  0.0
+gains_px4_fast         |  0.48s   0.0%  0.60s     |  0.49s   0.0%  0.59s     |  0.18s  40.4%     | 0.95m 0.95m     |   0.3deg 0.02m 0.05m   |  0.65s   0.9% 0.79s |  0.0
+gains_px4_slow         |  0.42s   0.0%  0.54s     |  0.42s   0.0%  0.56s     |  0.49s   8.5%     | 0.65m 0.24m     |   0.4deg 0.02m 0.09m   |  0.90s   0.0% 1.06s |  0.0
+gains_selected_nominal |  0.43s   0.0%  0.56s     |  0.44s   0.0%  0.54s     |  0.24s  23.3%     | 0.81m 0.68m     |   0.3deg 0.02m 0.06m   |  0.73s   0.6% 0.89s |  0.0
+gains_selected_fast    |  0.46s   0.0%  0.59s     |  0.46s   0.0%  0.59s     |  0.18s  43.6%     | 0.93m 0.92m     |   0.3deg 0.02m 0.07m   |  0.80s   0.7% 0.93s |  0.0
+gains_selected_slow    |  0.33s   0.0%  0.46s     |  0.34s   0.0%  0.48s     |  0.44s  14.7%     | 0.65m 0.14m     |   0.6deg 0.02m 0.08m   |  1.17s   0.0% 2.44s |  0.0

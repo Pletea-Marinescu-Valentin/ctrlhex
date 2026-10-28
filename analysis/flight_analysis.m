@@ -1,7 +1,8 @@
-function S = flight_analysis(vehicle, saveFigures)
+function [S, L, res] = flight_analysis(vehicle, saveFigures)
 % Flight-test analysis of commanded motor stops.
 %   S = flight_analysis('demonstrator')       large hexacopter, 2026-10-21
 %   S = flight_analysis('small')              small hexacopter, 2026-10-14
+%   [S, L, res] = flight_analysis(...)        also the log data and the per-stop results
 % Tilt error = angle between the commanded and the measured body z axis.
 
 if nargin < 1, vehicle = 'demonstrator'; end
@@ -132,6 +133,8 @@ fprintf('  stops applied / requested          %d / %d, motors covered: %s\n', S.
 fprintf('  restore duration (median)          %.1f s\n', S.restoreTime);
 fprintf('  tilt error stopped, median / max   %.1f / %.1f deg\n', S.tiltStopped);
 fprintf('  tilt error restoring, median / max %.1f / %.1f deg\n', S.tiltRestore);
+fprintf('  tilt error in %d six-motor windows of %.1f s, median / 95%% / max  %.1f / %.1f / %.1f deg\n', ...
+        S.nominalWindows, S.windowLength, S.tiltNominal);
 fprintf('  hover command -> four loaded rotors (median)  %.2f -> %.2f\n', S.hoverCmd, S.loadedCmd);
 fprintf('  opposite rotor: median command %.2f, in reverse %.0f%% of the time\n', S.oppositeCmd, 100 * S.oppositeReverse);
 fprintf('  max EKF height %.2f m (%s)\n', S.maxHeight, S.heightSource);
@@ -150,6 +153,21 @@ S.motors = unique(res(:, 2))';
 S.restoreTime = restoreTime;
 S.tiltStopped = [median(res(:, 3)) max(res(:, 3))];
 S.tiltRestore = [median(res(:, 4)) max(res(:, 4))];
+
+% Reference for the restore: the same max tilt error over windows as long as the restore window
+% (restore + 0.5 s), slid in 0.25 s steps through six-motor flight, 1 s clear of every stop and its restore
+% window and 2 s clear of take-off and landing; 95% = nearest-rank percentile
+S.windowLength = restoreTime + 0.5;
+busy = [[L.ev.t_stop]' - 1, [L.ev.t_done]' + 1.5];
+wmax = [];
+for t0 = L.t_air(1) + 2:0.25:L.t_air(2) - 2 - S.windowLength
+    t1 = t0 + S.windowLength;
+    if any(t0 < busy(:, 2) & t1 > busy(:, 1)), continue; end
+    wmax(end + 1) = max(L.tilt_err(L.att_t >= t0 & L.att_t <= t1)); %#ok<AGROW>
+end
+w = sort(wmax);
+S.nominalWindows = numel(w);
+S.tiltNominal = [median(w) w(ceil(0.95 * numel(w))) max(w)];
 
 flying = L.mot_t > 0 & L.mot_t < L.duration & mean(L.mot, 2) > 0.1;
 stopped = false(size(L.mot_t)); loaded = []; opp = [];
@@ -190,7 +208,8 @@ L.duration = seconds(u.EndTime - t0);
 [bat, L.bat_t]   = topic(u, 'battery_status', t0);
 [ld, ld_t]       = topic(u, 'vehicle_land_detected', t0);
 air = find(~ld.landed);
-L.airborne = ld_t(min(air(end) + 1, numel(ld_t))) - ld_t(air(1));
+L.t_air = [ld_t(air(1)), ld_t(min(air(end) + 1, numel(ld_t)))];
+L.airborne = diff(L.t_air);
 
 % stop at disarm: afterwards the estimator has no thrust and the baro height drifts
 msg = readLoggedOutput(u);

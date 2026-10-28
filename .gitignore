@@ -1,3 +1,7 @@
-results/sih/
+results/sih/*
+!results/sih/summary_*.txt
 __pycache__/
 *.asv
+
+# Local working files (paper sources, notes, drafts, templates): never committed
+local/
