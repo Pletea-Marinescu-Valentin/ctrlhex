@@ -1,0 +1,1459 @@
+diff --git a/boards/micoair/h743-v2/failinject.px4board b/boards/micoair/h743-v2/failinject.px4board
+new file mode 100644
+index 0000000000..4bf468008f
+--- /dev/null
++++ b/boards/micoair/h743-v2/failinject.px4board
+@@ -0,0 +1,3 @@
++CONFIG_MODULES_FAILURE_INJECTION_MANAGER=y
++CONFIG_SYSTEMCMDS_FAILURE=y
++CONFIG_MAVLINK_DIALECT="development"
+diff --git a/boards/micoair/h743-v2/nuttx-config/nsh/defconfig b/boards/micoair/h743-v2/nuttx-config/nsh/defconfig
+index ccd05f8a87..b98350b13a 100644
+--- a/boards/micoair/h743-v2/nuttx-config/nsh/defconfig
++++ b/boards/micoair/h743-v2/nuttx-config/nsh/defconfig
+@@ -166,6 +166,7 @@ CONFIG_SCHED_LPWORKPRIORITY=50
+ CONFIG_SCHED_LPWORKSTACKSIZE=1632
+ CONFIG_SCHED_WAITPID=y
+ CONFIG_SDMMC1_SDIO_PULLUP=y
++CONFIG_SDMMC1_WIDTH_D1_ONLY=y
+ CONFIG_SEM_PREALLOCHOLDERS=32
+ CONFIG_SERIAL_TERMIOS=y
+ CONFIG_SIG_DEFAULT=y
+diff --git a/boards/micoair/h743-v2/src/init.c b/boards/micoair/h743-v2/src/init.c
+index c0e1f9776c..c50fbcf200 100644
+--- a/boards/micoair/h743-v2/src/init.c
++++ b/boards/micoair/h743-v2/src/init.c
+@@ -94,8 +94,11 @@ __EXPORT void board_peripheral_reset(int ms)
+  ************************************************************************************/
+ __EXPORT void board_on_reset(int status)
+ {
++	// Drive the outputs low rather than leaving them as pulled-up inputs. An AM32 ESC that
++	// restarts while PX4 is still booting checks the signal line in its bootloader: a line held
++	// high without pulses keeps it in the bootloader, so it never picks up the later BDShot stream.
+ 	for (int i = 0; i < DIRECT_PWM_OUTPUT_CHANNELS; ++i) {
+-		px4_arch_configgpio(PX4_MAKE_GPIO_INPUT(io_timer_channel_get_as_pwm_input(i)));
++		px4_arch_configgpio(PX4_MAKE_GPIO_OUTPUT_CLEAR(io_timer_channel_get_gpio_output(i)));
+ 	}
+ 
+ 	/*
+diff --git a/src/drivers/dshot/DShot.cpp b/src/drivers/dshot/DShot.cpp
+index 34f3d8ee7f..5ccc0cda99 100644
+--- a/src/drivers/dshot/DShot.cpp
++++ b/src/drivers/dshot/DShot.cpp
+@@ -119,6 +119,12 @@ void DShot::Run()
+ 	// check at end of cycle (updateSubscriptions() can potentially change to a different WorkQueue thread)
+ 	_mixing_output.updateSubscriptions(true);
+ 
++	// Keep a steady frame stream while disarmed. Until the control allocator publishes, the mixer
++	// only runs every 50 ms, so the bidirectional line idles high with sparse frames.
++	if (!_armed_prev) {
++		ScheduleDelayed(2_ms);
++	}
++
+ 	perf_end(_cycle_perf);
+ }
+ 
+diff --git a/src/lib/robust_height/RobustHeight.hpp b/src/lib/robust_height/RobustHeight.hpp
+new file mode 100644
+index 0000000000..4c53a2bf19
+--- /dev/null
++++ b/src/lib/robust_height/RobustHeight.hpp
+@@ -0,0 +1,139 @@
++/****************************************************************************
++ *
++ *   Copyright (c) 2026 PX4 Development Team. All rights reserved.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ *
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in
++ *    the documentation and/or other materials provided with the
++ *    distribution.
++ * 3. Neither the name PX4 nor the names of its contributors may be
++ *    used to endorse or promote products derived from this software
++ *    without specific prior written permission.
++ *
++ * THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
++ * "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
++ * LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS
++ * FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE
++ * COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT,
++ * INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING,
++ * BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS
++ * OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED
++ * AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
++ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN
++ * ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
++ * POSSIBILITY OF SUCH DAMAGE.
++ *
++ ****************************************************************************/
++
++/**
++ * @file RobustHeight.hpp
++ *
++ * Height above ground from the distance sensor that ignores sudden jumps, e.g. a reflection or a lost
++ * return while the vehicle is tilted. The height is propagated with the estimated vertical velocity
++ * and pulled towards the distance measurement no faster than RATE_MARGIN, so a jump only moves it slowly
++ * while real climbs and descents (which show in the vertical velocity) are followed at once.
++ */
++
++#pragma once
++
++#include <drivers/drv_hrt.h>
++#include <mathlib/mathlib.h>
++#include <px4_platform_common/defines.h>
++
++class RobustHeight
++{
++public:
++	/**
++	 * @param dist_bottom distance sensor height above ground [m], NAN if invalid
++	 * @param vz vertical velocity, down positive [m/s], NAN if invalid
++	 * @param timestamp sample time [us]
++	 * @return robust height above ground [m], NAN while the distance is invalid
++	 */
++	float update(float dist_bottom, float vz, hrt_abstime timestamp)
++	{
++		if (!PX4_ISFINITE(dist_bottom)) {
++			reset();
++			return NAN;
++		}
++
++		if (!PX4_ISFINITE(_height) || !PX4_ISFINITE(vz) || (timestamp <= _timestamp)) {
++			_height = dist_bottom;
++
++		} else {
++			const float dt = math::min((timestamp - _timestamp) * 1e-6f, .5f);
++			const float predicted = _height - vz * dt;
++			_height = math::constrain(dist_bottom, predicted - RATE_MARGIN * dt, predicted + RATE_MARGIN * dt);
++		}
++
++		_timestamp = timestamp;
++		return _height;
++	}
++
++	void reset()
++	{
++		_height = NAN;
++		_timestamp = 0;
++	}
++
++	float get() const { return _height; }
++
++private:
++	static constexpr float RATE_MARGIN = .3f; ///< how fast the distance may pull the height beyond the velocity [m/s]
++
++	float _height{NAN};
++	hrt_abstime _timestamp{0};
++};
++
++/**
++ * Height above the point where the vehicle was armed, from the estimated local position, for a vehicle
++ * without a distance sensor (barometric height). The reference follows the vehicle while disarmed and is
++ * shifted with the estimator height resets, so it stays on the ground point in flight.
++ */
++class ArmedHeight
++{
++public:
++	/**
++	 * @param z local position, down positive [m]
++	 * @param z_valid z is valid
++	 * @param z_reset_counter estimator height reset counter
++	 * @param delta_z height step of the last estimator reset [m]
++	 * @param armed vehicle armed
++	 * @return height above the arming point [m], NAN while z is invalid or the arming point is unknown
++	 */
++	float update(float z, bool z_valid, uint8_t z_reset_counter, float delta_z, bool armed)
++	{
++		if (z_reset_counter != _z_reset_counter) {
++			if (PX4_ISFINITE(_z_ground) && PX4_ISFINITE(delta_z)) {
++				_z_ground += delta_z;
++			}
++
++			_z_reset_counter = z_reset_counter;
++		}
++
++		if (!z_valid || !PX4_ISFINITE(z)) {
++			_height = NAN;
++			return _height;
++		}
++
++		if (!armed) {
++			_z_ground = z;
++		}
++
++		// Armed without a valid z at the arming point: the height stays unknown
++		_height = _z_ground - z;
++		return _height;
++	}
++
++	float get() const { return _height; }
++
++private:
++	float _z_ground{NAN};
++	float _height{NAN};
++	uint8_t _z_reset_counter{0};
++};
+diff --git a/src/modules/commander/Commander.cpp b/src/modules/commander/Commander.cpp
+index ae163b0386..3a73a11878 100644
+--- a/src/modules/commander/Commander.cpp
++++ b/src/modules/commander/Commander.cpp
+@@ -802,6 +802,14 @@ transition_result_t Commander::disarm(arm_disarm_reason_t calling_reason, bool f
+ 	_param_com_flight_uuid.set(flight_uuid);
+ 	_param_com_flight_uuid.commit_no_notification();
+ 
++	if (calling_reason == arm_disarm_reason_t::kill_switch) {
++		// After a kill the battery is often pulled right away: hold back the parameter writes that follow a
++		// disarm (flight time, learned sensor biases) so only the log file is closed on the SD card.
++		param_control_autosave(false);
++		_kill_sd_quiet_until = _last_disarmed_timestamp + KILL_SD_QUIET_TIME;
++		mavlink_log_info(&_mavlink_log_pub, "Kill: SD card writes paused, battery can be removed\t");
++	}
++
+ 	_status_changed = true;
+ 
+ 	return TRANSITION_CHANGED;
+@@ -849,7 +857,6 @@ Commander::Commander() :
+ 	_user_mode_intention.change((uint8_t)_param_com_fltmode_boot.get(), ModeChangeSource::User, false, true);
+ 
+ 	_failsafe.setOnNotifyUserCallback(&Commander::onFailsafeNotifyUserTrampoline, this);
+-	_auto_disarm_killed.set_hysteresis_time_from(false, 5_s);
+ }
+ 
+ Commander::~Commander()
+@@ -1934,6 +1941,8 @@ void Commander::updateParameters()
+ 	// update parameters from storage
+ 	updateParams();
+ 
++	_auto_disarm_killed.set_hysteresis_time_from(false, math::max(_param_com_kill_disarm.get(), 0.f) * 1_s);
++
+ 	int32_t value_int32 = 0;
+ 
+ 	// MAV_TYPE -> vehicle_status.system_type
+@@ -2473,6 +2482,16 @@ void Commander::checkWorkerThread()
+ 
+ void Commander::handleAutoDisarm()
+ {
++	// Resume parameter saving after the post-kill quiet time, or as soon as the vehicle is armed again
++	if ((_kill_sd_quiet_until != 0) && (isArmed() || (hrt_absolute_time() > _kill_sd_quiet_until))) {
++		_kill_sd_quiet_until = 0;
++		param_control_autosave(true);
++
++		if (!isArmed()) {
++			param_save_default(true);
++		}
++	}
++
+ 	// Auto disarm when landed or kill switch engaged
+ 	if (isArmed()) {
+ 
+diff --git a/src/modules/commander/Commander.hpp b/src/modules/commander/Commander.hpp
+index c5abfc9dcd..2b116c257a 100644
+--- a/src/modules/commander/Commander.hpp
++++ b/src/modules/commander/Commander.hpp
+@@ -260,6 +260,9 @@ private:
+ 
+ 	hrt_abstime _boot_timestamp{0};
+ 	hrt_abstime _last_disarmed_timestamp{0};
++
++	static constexpr hrt_abstime KILL_SD_QUIET_TIME{10_s};	///< no parameter writes this long after a kill switch disarm
++	hrt_abstime _kill_sd_quiet_until{0};
+ 	bool _arm_on_boot_done{false};    ///< true once arm-on-boot has been attempted
+ 	bool _arm_on_boot_requested{false};
+ 	hrt_abstime _overload_start{0};		///< time when CPU overload started
+@@ -340,6 +343,7 @@ private:
+ 	DEFINE_PARAMETERS(
+ 		(ParamFloat<px4::params::COM_DISARM_LAND>)  _param_com_disarm_land,
+ 		(ParamFloat<px4::params::COM_DISARM_PRFLT>) _param_com_disarm_prflt,
++		(ParamFloat<px4::params::COM_KILL_DISARM>)  _param_com_kill_disarm,
+ 		(ParamInt<px4::params::COM_DL_LOSS_T>)      _param_com_dl_loss_t,
+ 		(ParamInt<px4::params::COM_HLDL_LOSS_T>)    _param_com_hldl_loss_t,
+ 		(ParamBool<px4::params::COM_HOME_EN>)       _param_com_home_en,
+diff --git a/src/modules/commander/commander_params.yaml b/src/modules/commander/commander_params.yaml
+index 867e362f8f..999090b9c9 100644
+--- a/src/modules/commander/commander_params.yaml
++++ b/src/modules/commander/commander_params.yaml
+@@ -104,6 +104,21 @@ parameters:
+       unit: s
+       decimal: 1
+       increment: 0.1
++    COM_KILL_DISARM:
++      description:
++        short: Time-out for auto disarm while the kill switch is engaged
++        long: |-
++          The vehicle disarms once the kill switch has been engaged for this time.
++          Releasing the kill switch earlier restarts the motors because the vehicle
++          is still armed. 0 disarms immediately, so the motors stay off until the
++          vehicle is armed again.
++      type: float
++      default: 5.0
++      unit: s
++      min: 0
++      max: 10
++      decimal: 1
++      increment: 0.1
+     COM_ARM_WO_GPS:
+       description:
+         short: Arming without GNSS configuration
+diff --git a/src/modules/commander/failsafe/failsafe.cpp b/src/modules/commander/failsafe/failsafe.cpp
+index 1d9786957b..ea4c31b312 100644
+--- a/src/modules/commander/failsafe/failsafe.cpp
++++ b/src/modules/commander/failsafe/failsafe.cpp
+@@ -92,7 +92,7 @@ FailsafeBase::ActionOptions Failsafe::fromNavDllOrRclActParam(int param_value)
+ 	return options;
+ }
+ 
+-FailsafeBase::ActionOptions Failsafe::fromGfActParam(int param_value)
++FailsafeBase::ActionOptions Failsafe::fromGfActParam(int param_value, bool force)
+ {
+ 	ActionOptions options{};
+ 
+@@ -129,6 +129,12 @@ FailsafeBase::ActionOptions Failsafe::fromGfActParam(int param_value)
+ 		break;
+ 	}
+ 
++	// GF_ACT_FORCE: no stick or mode-switch takeover, only disarming ends the action
++	if (force && options.action >= Action::Hold && options.action != Action::Terminate) {
++		options.allow_user_takeover = UserTakeoverAllowed::Never;
++		options.clear_condition = ClearCondition::OnDisarm;
++	}
++
+ 	return options;
+ }
+ 
+@@ -659,7 +665,8 @@ void Failsafe::checkStateAndMode(const hrt_abstime &time_us, const State &state,
+ 			       ActionOptions(Action::Hold).clearOn(ClearCondition::OnModeChangeOrDisarm));
+ 	}
+ 
+-	CHECK_FAILSAFE(status_flags, geofence_breached, fromGfActParam(_param_gf_action.get()).cannotBeDeferred());
++	CHECK_FAILSAFE(status_flags, geofence_breached,
++		       fromGfActParam(_param_gf_action.get(), _param_gf_act_force.get()).cannotBeDeferred());
+ 
+ 	// Battery flight time remaining failsafe
+ 	CHECK_FAILSAFE(status_flags, battery_low_remaining_time,
+diff --git a/src/modules/commander/failsafe/failsafe.h b/src/modules/commander/failsafe/failsafe.h
+index 7070ac263e..183399836a 100644
+--- a/src/modules/commander/failsafe/failsafe.h
++++ b/src/modules/commander/failsafe/failsafe.h
+@@ -178,7 +178,7 @@ private:
+ 
+ 	static ActionOptions fromNavDllOrRclActParam(int param_value);
+ 
+-	static ActionOptions fromGfActParam(int param_value);
++	static ActionOptions fromGfActParam(int param_value, bool force);
+ 	static ActionOptions fromActuatorFailureActParam(int param_value);
+ 	static ActionOptions fromBatteryWarningActParam(int param_value, uint8_t battery_warning);
+ 	static ActionOptions fromQuadchuteActParam(int param_value);
+@@ -223,6 +223,7 @@ private:
+ 					(ParamInt<px4::params::COM_DLL_EXCEPT>) _param_com_dll_except,
+ 					(ParamInt<px4::params::COM_RC_IN_MODE>) _param_com_rc_in_mode,
+ 					(ParamInt<px4::params::GF_ACTION>)  	_param_gf_action,
++					(ParamBool<px4::params::GF_ACT_FORCE>)	_param_gf_act_force,
+ 					(ParamFloat<px4::params::COM_SPOOLUP_TIME>) _param_com_spoolup_time,
+ 					(ParamInt<px4::params::CBRK_FLIGHTTERM>) _param_cbrk_flightterm,
+ 					(ParamInt<px4::params::COM_ACT_FAIL_ACT>) _param_com_actuator_failure_act,
+diff --git a/src/modules/control_allocator/ControlAllocator.cpp b/src/modules/control_allocator/ControlAllocator.cpp
+index c371c6a441..299be4269a 100644
+--- a/src/modules/control_allocator/ControlAllocator.cpp
++++ b/src/modules/control_allocator/ControlAllocator.cpp
+@@ -315,7 +315,7 @@ ControlAllocator::Run()
+ 		parameter_update_s param_update;
+ 		_parameter_update_sub.copy(&param_update);
+ 
+-		if (_handled_motor_failure_bitmask == 0) {
++		if (_handled_motor_failure_bitmask == 0 && _restoring_motor_mask == 0) {
+ 			// We don't update the geometry after an actuator failure, as it could lead to unexpected results
+ 			// (e.g. a user could add/remove motors, such that the bitmask isn't correct anymore)
+ 			updateParams();
+@@ -400,6 +400,8 @@ ControlAllocator::Run()
+ 
+ 		check_for_motor_failures();
+ 
++		update_motor_restore(now);
++
+ 		update_effectiveness_matrix_if_needed(EffectivenessUpdateReason::NO_EXTERNAL_UPDATE);
+ 
+ 		// Set control setpoint vector(s)
+@@ -556,16 +558,23 @@ ControlAllocator::update_effectiveness_matrix_if_needed(EffectivenessUpdateReaso
+ 			computeOppositeMotors();
+ 		}
+ 
+-		// Handle failed actuators
+-		if (_handled_motor_failure_bitmask != 0) {
++		// Handle failed actuators, and motors coming back after a failure (see update_motor_restore())
++		if (_handled_motor_failure_bitmask != 0 || _restoring_motor_mask != 0) {
+ 			actuator_idx = 0;
+ 			memset(&actuator_idx_matrix, 0, sizeof(actuator_idx_matrix));
+ 
+ 			for (int motors_idx = 0; motors_idx < _num_actuators[0] && motors_idx < actuator_motors_s::NUM_CONTROLS; motors_idx++) {
+ 				int selected_matrix = _control_allocation_selection_indexes[actuator_idx];
++				ActuatorEffectiveness::EffectivenessMatrix &effectiveness = config.effectiveness_matrices[selected_matrix];
+ 
+ 				if (_handled_motor_failure_bitmask & (1 << motors_idx)) {
+-					config.effectiveness_matrices[selected_matrix].setCol(actuator_idx_matrix[selected_matrix], 0.f);
++					effectiveness.setCol(actuator_idx_matrix[selected_matrix], 0.f);
++
++				} else if (_restoring_motor_mask & (1 << motors_idx)) {
++					// The motor's output is scaled by the same factor in publish_actuator_controls()
++					for (int n = 0; n < NUM_AXES; n++) {
++						effectiveness(n, actuator_idx_matrix[selected_matrix]) *= _restore_scale;
++					}
+ 				}
+ 
+ 				++actuator_idx_matrix[selected_matrix];
+@@ -598,6 +607,16 @@ ControlAllocator::update_effectiveness_matrix_if_needed(EffectivenessUpdateReaso
+ 				}
+ 			}
+ 
++			// Axes the failure allocation had dropped stay dropped until the motors are fully back:
++			// re-adding them on a barely independent row would demand large differential commands
++			if (i == 0 && _restoring_motor_mask != 0) {
++				for (int n = 0; n < NUM_AXES; n++) {
++					if (_restore_dropped_axes & (1u << n)) {
++						matrix.row(n) = 0.f;
++					}
++				}
++			}
++
+ 			// Assign control effectiveness matrix
+ 			int total_num_actuators = config.num_actuators_matrix[i];
+ 			_control_allocation[i]->setEffectivenessMatrix(config.effectiveness_matrices[i], config.trim[i],
+@@ -700,8 +719,8 @@ ControlAllocator::publish_control_allocator_status(int matrix_index)
+ 		}
+ 	}
+ 
+-	// Handled motor failures
+-	control_allocator_status.handled_motor_failure_mask = _handled_motor_failure_bitmask;
++	// Handled motor failures, including motors not yet fully back in the allocation
++	control_allocator_status.handled_motor_failure_mask = _handled_motor_failure_bitmask | _restoring_motor_mask;
+ 	control_allocator_status.motor_stop_mask = _motor_stop_mask;
+ 
+ 	_control_allocator_status_pub[matrix_index].publish(control_allocator_status);
+@@ -764,6 +783,13 @@ ControlAllocator::publish_actuator_controls()
+ 			actuator_sp /= _param_ca_rev_thr_frac.get();
+ 		}
+ 
++		// A motor coming back after a failure was allocated on its effectiveness column scaled by _restore_scale.
++		// Scaling its output by the same factor keeps the produced torque and thrust exactly as allocated,
++		// while the motor itself only takes its share of the load gradually.
++		if ((_restoring_motor_mask & (1u << motors_idx)) && PX4_ISFINITE(actuator_sp)) {
++			actuator_sp *= _restore_scale;
++		}
++
+ 		actuator_motors.control[motors_idx] = PX4_ISFINITE(actuator_sp) ? actuator_sp : NAN;
+ 		++actuator_idx_matrix[selected_matrix];
+ 		++actuator_idx;
+@@ -843,6 +869,9 @@ ControlAllocator::check_for_motor_failures()
+ 			const int num_motors_failed = math::countSetBits(failure_detector_status.motor_failure_mask);
+ 
+ 			if (_handled_motor_failure_bitmask == 0 && num_motors_failed == 1) {
++				// A new failure ends a restore that may still be in progress
++				_restoring_motor_mask = 0;
++				_runtime_reversible_bitmask = 0;
+ 				_handled_motor_failure_bitmask = failure_detector_status.motor_failure_mask;
+ 
+ 				const int failed = math::countTrailingZeros(_handled_motor_failure_bitmask);
+@@ -874,17 +903,71 @@ ControlAllocator::check_for_motor_failures()
+ 			}
+ 
+ 		} else if (_handled_motor_failure_bitmask != 0) {
+-			PX4_INFO("Restoring all motors");
++			// The failure cleared (e.g. the failure injection was switched off). A stopped motor needs time to
++			// spin up, so the allocation does not switch back in one step: the motors idle first and then take
++			// their share of the load gradually, see update_motor_restore().
++			_restoring_motor_mask = _handled_motor_failure_bitmask;
++			_restore_dropped_axes = (_num_control_allocation > 0) ? _control_allocation[0]->getDroppedAxes() : 0;
++			_restore_start = hrt_absolute_time();
++			_restore_scale = 0.f;
+ 			_handled_motor_failure_bitmask = 0;
+-			_runtime_reversible_bitmask = 0;
+-
+-			for (int i = 0; i < _num_control_allocation; ++i) {
+-				_control_allocation[i]->setHadActuatorFailure(false);
+-			}
++			PX4_INFO("Restoring motors (mask 0x%x)", _restoring_motor_mask);
+ 
+ 			update_effectiveness_matrix_if_needed(EffectivenessUpdateReason::MOTOR_ACTIVATION_UPDATE);
+ 		}
+ 	}
++
++	// Mode 2 keeps the opposite rotor reversible only in the air. At touchdown the collective thrust
++	// collapses, the remaining rotors can only add one-sided torque and the vehicle tips over, so the
++	// landing is finished with the opposite rotor stopped as in mode 1 (its hover thrust is zero anyway).
++	// Not during a restore, where the failed motor is already coming back.
++	vehicle_land_detected_s land_detected;
++
++	if (_runtime_reversible_bitmask != 0 && _restoring_motor_mask == 0 && _vehicle_land_detected_sub.copy(&land_detected)
++	    && (land_detected.ground_contact || land_detected.maybe_landed || land_detected.landed)) {
++		PX4_WARN("Ground contact: stopping opposite motor (mask 0x%x)", _runtime_reversible_bitmask);
++		_handled_motor_failure_bitmask |= _runtime_reversible_bitmask;
++		_runtime_reversible_bitmask = 0;
++		update_effectiveness_matrix_if_needed(EffectivenessUpdateReason::MOTOR_ACTIVATION_UPDATE);
++	}
++}
++
++void
++ControlAllocator::update_motor_restore(const hrt_abstime now)
++{
++	if (_restoring_motor_mask == 0) {
++		return;
++	}
++
++	const float spin_up_time = fmaxf(_param_ca_restore_spin.get(), 0.f);
++	const float blend_time = fmaxf(_param_ca_restore_time.get(), 0.f);
++	const float elapsed = (now > _restore_start) ? (now - _restore_start) * 1e-6f : 0.f;
++
++	if (elapsed >= spin_up_time + blend_time) {
++		PX4_INFO("All motors restored");
++		_restoring_motor_mask = 0;
++		_runtime_reversible_bitmask = 0;
++		_restore_scale = 1.f;
++
++		for (int i = 0; i < _num_control_allocation; ++i) {
++			_control_allocation[i]->setHadActuatorFailure(false);
++		}
++
++		update_effectiveness_matrix_if_needed(EffectivenessUpdateReason::MOTOR_ACTIVATION_UPDATE);
++		return;
++	}
++
++	// The restored motors idle during the spin-up time (scale 0: outside the allocation, output 0),
++	// then their share goes from 0 to 1 along a smoothstep, so it starts and ends without a kink
++	const float x = (blend_time > FLT_EPSILON) ? math::constrain((elapsed - spin_up_time) / blend_time, 0.f, 1.f) : 0.f;
++	const float scale = x * x * (3.f - 2.f * x);
++
++	// Re-solving the allocation every 10 ms is smooth enough and keeps the CPU load low
++	if (scale > _restore_scale && now - _last_restore_update >= 10_ms) {
++		_restore_scale = scale;
++		_last_restore_update = now;
++		update_effectiveness_matrix_if_needed(EffectivenessUpdateReason::MOTOR_ACTIVATION_UPDATE);
++	}
+ }
+ 
+ int ControlAllocator::task_spawn(int argc, char *argv[])
+@@ -1061,6 +1144,10 @@ int ControlAllocator::print_status()
+ 			 _handled_motor_failure_bitmask);
+ 	}
+ 
++	if (_restoring_motor_mask) {
++		PX4_INFO("Restoring motors: 0x%x, share %.2f", _restoring_motor_mask, (double)_restore_scale);
++	}
++
+ 	// Print perf
+ 	perf_print_counter(_loop_perf);
+ 
+diff --git a/src/modules/control_allocator/ControlAllocator.hpp b/src/modules/control_allocator/ControlAllocator.hpp
+index e79a1c6b18..9166a472e1 100644
+--- a/src/modules/control_allocator/ControlAllocator.hpp
++++ b/src/modules/control_allocator/ControlAllocator.hpp
+@@ -80,6 +80,7 @@
+ #include <uORB/topics/vehicle_thrust_setpoint.h>
+ #include <uORB/topics/vehicle_status.h>
+ #include <uORB/topics/failure_detector_status.h>
++#include <uORB/topics/vehicle_land_detected.h>
+ 
+ class ControlAllocator : public ModuleBase, public ModuleParams, public px4::ScheduledWorkItem
+ {
+@@ -143,6 +144,9 @@ private:
+ 
+ 	void check_for_motor_failures();
+ 
++	// Bring motors back gradually after a failure cleared (CA_RESTORE_SPIN, CA_RESTORE_TIME)
++	void update_motor_restore(const hrt_abstime now);
++
+ 	// Populate _opposite_motor[] with each motor's geometric antipode (hexarotor only); -1 if none.
+ 	void computeOppositeMotors();
+ 
+@@ -220,6 +224,7 @@ private:
+ 	uORB::Subscription _vehicle_status_sub{ORB_ID(vehicle_status)};
+ 	uORB::Subscription _vehicle_control_mode_sub{ORB_ID(vehicle_control_mode)};
+ 	uORB::Subscription _failure_detector_status_sub{ORB_ID(failure_detector_status)};
++	uORB::Subscription _vehicle_land_detected_sub{ORB_ID(vehicle_land_detected)};
+ 
+ 	matrix::Vector3f _torque_sp;
+ 	matrix::Vector3f _thrust_sp;
+@@ -235,6 +240,14 @@ private:
+ 	uint16_t _runtime_reversible_bitmask{0}; // motors made reversible at runtime because of failure event
+ 	int8_t _opposite_motor[MAX_NUM_MOTORS]; // per-motor index of geometric opposite; -1 if none
+ 
++	// Motor restore after a failure cleared: the motors in _restoring_motor_mask idle first, then their
++	// effectiveness columns and their outputs are both scaled by _restore_scale, which goes from 0 to 1.
++	uint16_t _restoring_motor_mask{0};
++	float _restore_scale{1.f};
++	uint8_t _restore_dropped_axes{0}; // axes the failure allocation had dropped, kept dropped while restoring
++	hrt_abstime _restore_start{0};
++	hrt_abstime _last_restore_update{0};
++
+ 	ActuatorGroupPreflightCheck _actuator_group_preflight_check;
+ 
+ 	perf_counter_t	_loop_perf;			/**< loop duration performance counter */
+@@ -256,6 +269,8 @@ private:
+ 		(ParamInt<px4::params::CA_FAILURE_MODE>) _param_ca_failure_mode,
+ 		(ParamInt<px4::params::CA_R_REV>) _param_r_rev,
+ 		(ParamFloat<px4::params::CA_REV_THR_FRAC>) _param_ca_rev_thr_frac,
++		(ParamFloat<px4::params::CA_RESTORE_SPIN>) _param_ca_restore_spin,
++		(ParamFloat<px4::params::CA_RESTORE_TIME>) _param_ca_restore_time,
+ 		(ParamFloat<px4::params::CA_ICE_PERIOD>) _param_ice_shedding_period
+ 	)
+ 
+diff --git a/src/modules/control_allocator/module.yaml b/src/modules/control_allocator/module.yaml
+index 8571373930..29947abfed 100644
+--- a/src/modules/control_allocator/module.yaml
++++ b/src/modules/control_allocator/module.yaml
+@@ -80,6 +80,35 @@ parameters:
+             min: 0.1
+             max: 1.0
+             default: 0.4
++        CA_RESTORE_SPIN:
++            description:
++                short: Motor restore spin-up time
++                long: |
++                  When a handled motor failure clears (e.g. the failure injection is switched off), the
++                  stopped motors first run at idle for this time while the allocation still flies without
++                  them, so the ESC can start them before they get any load. Then CA_RESTORE_TIME applies.
++            type: float
++            decimal: 2
++            increment: 0.05
++            unit: s
++            min: 0.0
++            max: 2.0
++            default: 0.3
++        CA_RESTORE_TIME:
++            description:
++                short: Motor restore blend time
++                long: |
++                  After CA_RESTORE_SPIN, the restored motors take over their share of the load gradually
++                  over this time, from the failure allocation to the full one. Torque and thrust stay as
++                  commanded all along, the load just moves between motors smoothly.
++                  With this and CA_RESTORE_SPIN at 0 the full allocation comes back in one step.
++            type: float
++            decimal: 2
++            increment: 0.1
++            unit: s
++            min: 0.0
++            max: 5.0
++            default: 1.0
+         CA_R${i}_SLEW:
+             description:
+                 short: Motor ${i} slew rate limit
+diff --git a/src/modules/failure_injection_manager/FailureInjectionManager.cpp b/src/modules/failure_injection_manager/FailureInjectionManager.cpp
+index 0994fc8c79..d51cef8016 100644
+--- a/src/modules/failure_injection_manager/FailureInjectionManager.cpp
++++ b/src/modules/failure_injection_manager/FailureInjectionManager.cpp
+@@ -55,7 +55,7 @@ bool FailureInjectionManager::init()
+ 		return false;
+ 	}
+ 
+-	if (_param_sys_fail_rc_src.get() != 0) {
++	if (_param_sys_fail_rc_src.get() != 0 || _param_sys_fail_rc2_src.get() != 0 || _param_sys_fail_rc3_src.get() != 0) {
+ 		if (!_manual_control_setpoint_sub.registerCallback()) {
+ 			PX4_ERR("manual_control_setpoint callback registration failed");
+ 			return false;
+@@ -98,57 +98,82 @@ void FailureInjectionManager::Run()
+ 
+ void FailureInjectionManager::evaluateRcInjection()
+ {
+-	if (_param_sys_fail_rc_src.get() == 0) {
++	if (_param_sys_fail_rc_src.get() == 0 && _param_sys_fail_rc2_src.get() == 0 && _param_sys_fail_rc3_src.get() == 0) {
+ 		return;
+ 	}
+ 
+ 	manual_control_setpoint_s manual_control_setpoint;
+ 
+ 	if (_manual_control_setpoint_sub.update(&manual_control_setpoint)) {
+-		float value = NAN;
++		// Switch high fails the first mask, switch low fails the second (0 = that position does nothing).
++		// SYS_FAIL_RC_INST = 0 keeps its upstream meaning of all instances.
++		const int32_t inst = _param_sys_fail_rc_inst.get();
++		evaluateRcSwitch(manual_control_setpoint, _param_sys_fail_rc_src.get(),
++				 (inst == 0) ? 0xFFFF : static_cast<uint16_t>(inst),
++				 static_cast<uint16_t>(_param_sys_fail_rc_insl.get()), _rc_active_mask);
++		evaluateRcSwitch(manual_control_setpoint, _param_sys_fail_rc2_src.get(),
++				 static_cast<uint16_t>(_param_sys_fail_rc2_hi.get()),
++				 static_cast<uint16_t>(_param_sys_fail_rc2_lo.get()), _rc2_active_mask);
++		evaluateRcSwitch(manual_control_setpoint, _param_sys_fail_rc3_src.get(),
++				 static_cast<uint16_t>(_param_sys_fail_rc3_hi.get()),
++				 static_cast<uint16_t>(_param_sys_fail_rc3_lo.get()), _rc3_active_mask);
++	}
++}
++
++void FailureInjectionManager::evaluateRcSwitch(const manual_control_setpoint_s &manual_control_setpoint, int32_t source,
++		uint16_t high_mask, uint16_t low_mask, uint16_t &active_mask)
++{
++	float value = NAN;
+ 
+-		if (manual_control_setpoint.valid) {
+-			switch (_param_sys_fail_rc_src.get()) {
+-			case 1: value = manual_control_setpoint.aux1; break;
++	if (manual_control_setpoint.valid) {
++		switch (source) {
++		case 1: value = manual_control_setpoint.aux1; break;
+ 
+-			case 2: value = manual_control_setpoint.aux2; break;
++		case 2: value = manual_control_setpoint.aux2; break;
+ 
+-			case 3: value = manual_control_setpoint.aux3; break;
++		case 3: value = manual_control_setpoint.aux3; break;
+ 
+-			case 4: value = manual_control_setpoint.aux4; break;
++		case 4: value = manual_control_setpoint.aux4; break;
+ 
+-			case 5: value = manual_control_setpoint.aux5; break;
++		case 5: value = manual_control_setpoint.aux5; break;
+ 
+-			case 6: value = manual_control_setpoint.aux6; break;
++		case 6: value = manual_control_setpoint.aux6; break;
+ 
+-			default: break; // 0 = disabled, or out of range
+-			}
++		default: break; // 0 = disabled, or out of range
+ 		}
++	}
+ 
+-		const bool triggered = value > 0.5f;
++	uint16_t mask = 0;
+ 
+-		if (triggered && !_rc_active) {
+-			const int32_t raw = _param_sys_fail_rc_inst.get();
+-			_rc_active_unit = static_cast<uint8_t>(_param_sys_fail_rc_unit.get());
+-			// SYS_FAIL_RC_INST is an instance bitmask (bit 0 = instance 1); 0 = all instances.
+-			_rc_active_mask = (raw == 0) ? 0xFFFF : static_cast<uint16_t>(raw);
+-			_rc_active = true;
++	if (value > 0.5f) {
++		mask = high_mask;
+ 
+-			const uint8_t type = static_cast<uint8_t>(_param_sys_fail_rc_mode.get());
++	} else if (value < -0.5f) {
++		mask = low_mask;
++	}
+ 
+-			if (_table.injectMask(_rc_active_unit, type, _rc_active_mask) == failure_injection::FailureTable::AckResult::Accepted) {
+-				announceFailure(_rc_active_unit, type, _rc_active_mask);
+-			}
++	if (mask == active_mask) {
++		return;
++	}
++
++	const uint8_t unit = static_cast<uint8_t>(_param_sys_fail_rc_unit.get());
++
++	if (active_mask != 0) {
++		if (_table.injectMask(unit, failure_injection_s::FAILURE_TYPE_OK,
++				      active_mask) == failure_injection::FailureTable::AckResult::Accepted) {
++			announceFailure(unit, failure_injection_s::FAILURE_TYPE_OK, active_mask);
++		}
++	}
+ 
+-		} else if (!triggered && _rc_active) {
+-			if (_table.injectMask(_rc_active_unit, failure_injection_s::FAILURE_TYPE_OK,
+-					      _rc_active_mask) == failure_injection::FailureTable::AckResult::Accepted) {
+-				announceFailure(_rc_active_unit, failure_injection_s::FAILURE_TYPE_OK, _rc_active_mask);
+-			}
++	if (mask != 0) {
++		const uint8_t type = static_cast<uint8_t>(_param_sys_fail_rc_mode.get());
+ 
+-			_rc_active = false;
++		if (_table.injectMask(unit, type, mask) == failure_injection::FailureTable::AckResult::Accepted) {
++			announceFailure(unit, type, mask);
+ 		}
+ 	}
++
++	active_mask = mask;
+ }
+ 
+ void FailureInjectionManager::handleCommand(const vehicle_command_s &cmd)
+diff --git a/src/modules/failure_injection_manager/FailureInjectionManager.hpp b/src/modules/failure_injection_manager/FailureInjectionManager.hpp
+index 9b6808a79e..c63a1264a4 100644
+--- a/src/modules/failure_injection_manager/FailureInjectionManager.hpp
++++ b/src/modules/failure_injection_manager/FailureInjectionManager.hpp
+@@ -83,6 +83,8 @@ private:
+ 	void announceFailure(uint8_t unit, uint8_t type, uint16_t mask);
+ 
+ 	void evaluateRcInjection();
++	void evaluateRcSwitch(const manual_control_setpoint_s &manual_control_setpoint, int32_t source,
++			      uint16_t high_mask, uint16_t low_mask, uint16_t &active_mask);
+ 
+ 	uORB::SubscriptionCallbackWorkItem _vehicle_command_sub{this, ORB_ID(vehicle_command)};
+ 	uORB::SubscriptionCallbackWorkItem _manual_control_setpoint_sub{this, ORB_ID(manual_control_setpoint)};
+@@ -94,15 +96,22 @@ private:
+ 
+ 	orb_advert_t _mavlink_log_pub{nullptr};
+ 
+-	bool     _rc_active{false};
+-	uint8_t  _rc_active_unit{0};
+ 	uint16_t _rc_active_mask{0};
++	uint16_t _rc2_active_mask{0};
++	uint16_t _rc3_active_mask{0};
+ 
+ 	DEFINE_PARAMETERS(
+ 		(ParamInt<px4::params::SYS_FAIL_RC_SRC>) _param_sys_fail_rc_src,
+ 		(ParamInt<px4::params::SYS_FAIL_RC_UNIT>) _param_sys_fail_rc_unit,
+ 		(ParamInt<px4::params::SYS_FAIL_RC_MODE>) _param_sys_fail_rc_mode,
+ 		(ParamInt<px4::params::SYS_FAIL_RC_INST>) _param_sys_fail_rc_inst,
++		(ParamInt<px4::params::SYS_FAIL_RC_INSL>) _param_sys_fail_rc_insl,
++		(ParamInt<px4::params::SYS_FAIL_RC2_SRC>) _param_sys_fail_rc2_src,
++		(ParamInt<px4::params::SYS_FAIL_RC2_HI>) _param_sys_fail_rc2_hi,
++		(ParamInt<px4::params::SYS_FAIL_RC2_LO>) _param_sys_fail_rc2_lo,
++		(ParamInt<px4::params::SYS_FAIL_RC3_SRC>) _param_sys_fail_rc3_src,
++		(ParamInt<px4::params::SYS_FAIL_RC3_HI>) _param_sys_fail_rc3_hi,
++		(ParamInt<px4::params::SYS_FAIL_RC3_LO>) _param_sys_fail_rc3_lo,
+ 		// Consumed via param_find() in failure_injection::process_XXXX(); registered
+ 		// here so it is marked used and shows up in the GCS parameter list.
+ 		(ParamInt<px4::params::SYS_FAIL_GPS_WRG>) _param_sys_fail_gps_wrg,
+diff --git a/src/modules/failure_injection_manager/failure_injection_manager_params.yaml b/src/modules/failure_injection_manager/failure_injection_manager_params.yaml
+index 3cfb72ffe8..76bc873fac 100644
+--- a/src/modules/failure_injection_manager/failure_injection_manager_params.yaml
++++ b/src/modules/failure_injection_manager/failure_injection_manager_params.yaml
+@@ -99,6 +99,156 @@ parameters:
+         min: 0
+         max: 65535
+         reboot_required: true
++      SYS_FAIL_RC_INSL:
++        description:
++          short: Instances failed by the RC switch in the low position
++          long: |-
++            Bitmask of instances of SYS_FAIL_RC_UNIT failed while the SYS_FAIL_RC_SRC
++            input is low (below -0.5), for a 3-position switch. SYS_FAIL_RC_INST is
++            used in the high position, and the middle position injects nothing.
++            0 = the low position injects nothing.
++        type: bitmask
++        bit:
++          0: Instance 1
++          1: Instance 2
++          2: Instance 3
++          3: Instance 4
++          4: Instance 5
++          5: Instance 6
++          6: Instance 7
++          7: Instance 8
++          8: Instance 9
++          9: Instance 10
++          10: Instance 11
++          11: Instance 12
++          12: Instance 13
++          13: Instance 14
++          14: Instance 15
++          15: Instance 16
++        default: 0
++        min: 0
++        max: 65535
++        reboot_required: true
++      SYS_FAIL_RC2_SRC:
++        description:
++          short: RC aux input of the second failure switch
++          long: |-
++            Second switch that injects SYS_FAIL_RC_MODE on SYS_FAIL_RC_UNIT:
++            SYS_FAIL_RC2_HI in the high position, SYS_FAIL_RC2_LO in the low position,
++            nothing in the middle. Mapped via RC_MAP_AUXn and gated by SYS_FAILURE_EN.
++        type: enum
++        min: 0
++        max: 6
++        default: 0
++        reboot_required: true
++        values:
++          0: Disabled
++          1: AUX1
++          2: AUX2
++          3: AUX3
++          4: AUX4
++          5: AUX5
++          6: AUX6
++      SYS_FAIL_RC2_HI:
++        description:
++          short: Instances failed by the second switch in the high position
++          long: |-
++            Bitmask of instances of SYS_FAIL_RC_UNIT (bit 0 = instance 1).
++            0 = the high position injects nothing.
++        type: bitmask
++        bit:
++          0: Instance 1
++          1: Instance 2
++          2: Instance 3
++          3: Instance 4
++          4: Instance 5
++          5: Instance 6
++          6: Instance 7
++          7: Instance 8
++        default: 0
++        min: 0
++        max: 65535
++        reboot_required: true
++      SYS_FAIL_RC2_LO:
++        description:
++          short: Instances failed by the second switch in the low position
++          long: |-
++            Bitmask of instances of SYS_FAIL_RC_UNIT (bit 0 = instance 1).
++            0 = the low position injects nothing.
++        type: bitmask
++        bit:
++          0: Instance 1
++          1: Instance 2
++          2: Instance 3
++          3: Instance 4
++          4: Instance 5
++          5: Instance 6
++          6: Instance 7
++          7: Instance 8
++        default: 0
++        min: 0
++        max: 65535
++        reboot_required: true
++      SYS_FAIL_RC3_SRC:
++        description:
++          short: RC aux input of the third failure switch
++          long: |-
++            Third switch that injects SYS_FAIL_RC_MODE on SYS_FAIL_RC_UNIT:
++            SYS_FAIL_RC3_HI in the high position, SYS_FAIL_RC3_LO in the low position,
++            nothing in the middle. Mapped via RC_MAP_AUXn and gated by SYS_FAILURE_EN.
++        type: enum
++        min: 0
++        max: 6
++        default: 0
++        reboot_required: true
++        values:
++          0: Disabled
++          1: AUX1
++          2: AUX2
++          3: AUX3
++          4: AUX4
++          5: AUX5
++          6: AUX6
++      SYS_FAIL_RC3_HI:
++        description:
++          short: Instances failed by the third switch in the high position
++          long: |-
++            Bitmask of instances of SYS_FAIL_RC_UNIT (bit 0 = instance 1).
++            0 = the high position injects nothing.
++        type: bitmask
++        bit:
++          0: Instance 1
++          1: Instance 2
++          2: Instance 3
++          3: Instance 4
++          4: Instance 5
++          5: Instance 6
++          6: Instance 7
++          7: Instance 8
++        default: 0
++        min: 0
++        max: 65535
++        reboot_required: true
++      SYS_FAIL_RC3_LO:
++        description:
++          short: Instances failed by the third switch in the low position
++          long: |-
++            Bitmask of instances of SYS_FAIL_RC_UNIT (bit 0 = instance 1).
++            0 = the low position injects nothing.
++        type: bitmask
++        bit:
++          0: Instance 1
++          1: Instance 2
++          2: Instance 3
++          3: Instance 4
++          4: Instance 5
++          5: Instance 6
++          6: Instance 7
++          7: Instance 8
++        default: 0
++        min: 0
++        max: 65535
++        reboot_required: true
+       SYS_FAIL_GPS_WRG:
+         description:
+           short: GPS Wrong-failure fix type
+diff --git a/src/modules/flight_mode_manager/tasks/ManualAltitude/FlightTaskManualAltitude.cpp b/src/modules/flight_mode_manager/tasks/ManualAltitude/FlightTaskManualAltitude.cpp
+index 9ac095ab8c..c6a93bce82 100644
+--- a/src/modules/flight_mode_manager/tasks/ManualAltitude/FlightTaskManualAltitude.cpp
++++ b/src/modules/flight_mode_manager/tasks/ManualAltitude/FlightTaskManualAltitude.cpp
+@@ -86,6 +86,11 @@ void FlightTaskManualAltitude::_updateConstraintsFromEstimator()
+ 	if (!PX4_ISFINITE(_max_distance_to_ground) && PX4_ISFINITE(_sub_vehicle_local_position.get().hagl_max_z)) {
+ 		_max_distance_to_ground = _sub_vehicle_local_position.get().hagl_max_z;
+ 	}
++
++	// User ceiling: _respectMaxAltitude() then caps the climb rate and descends above it
++	if (_param_mpc_hagl_max.get() > FLT_EPSILON) {
++		_max_distance_to_ground = fminf(_max_distance_to_ground, _param_mpc_hagl_max.get());
++	}
+ }
+ 
+ void FlightTaskManualAltitude::_scaleSticks()
+diff --git a/src/modules/flight_mode_manager/tasks/ManualAltitude/FlightTaskManualAltitude.hpp b/src/modules/flight_mode_manager/tasks/ManualAltitude/FlightTaskManualAltitude.hpp
+index 9848fdff65..5af6c002c9 100644
+--- a/src/modules/flight_mode_manager/tasks/ManualAltitude/FlightTaskManualAltitude.hpp
++++ b/src/modules/flight_mode_manager/tasks/ManualAltitude/FlightTaskManualAltitude.hpp
+@@ -94,7 +94,8 @@ protected:
+ 					(ParamFloat<px4::params::MPC_LAND_SPEED>)
+ 					_param_mpc_land_speed, /**< desired downwards speed when approaching the ground */
+ 					(ParamFloat<px4::params::MPC_TKO_SPEED>)
+-					_param_mpc_tko_speed /**< desired upwards speed when still close to the ground */
++					_param_mpc_tko_speed, /**< desired upwards speed when still close to the ground */
++					(ParamFloat<px4::params::MPC_HAGL_MAX>) _param_mpc_hagl_max /**< hard ceiling above ground, 0 = off */
+ 				       )
+ private:
+ 	/**
+diff --git a/src/modules/mc_att_control/mc_att_control.hpp b/src/modules/mc_att_control/mc_att_control.hpp
+index b6e9b066d9..492060f831 100644
+--- a/src/modules/mc_att_control/mc_att_control.hpp
++++ b/src/modules/mc_att_control/mc_att_control.hpp
+@@ -47,6 +47,8 @@
+ #include <uORB/topics/manual_control_setpoint.h>
+ #include <uORB/topics/parameter_update.h>
+ #include <uORB/topics/autotune_attitude_control_status.h>
++#include <uORB/topics/control_allocator_status.h>
++#include <uORB/topics/failure_detector_status.h>
+ #include <uORB/topics/hover_thrust_estimate.h>
+ #include <uORB/topics/vehicle_attitude.h>
+ #include <uORB/topics/vehicle_attitude_setpoint.h>
+@@ -56,6 +58,7 @@
+ #include <uORB/topics/vehicle_rates_setpoint.h>
+ #include <uORB/topics/vehicle_status.h>
+ #include <lib/mathlib/math/filter/AlphaFilter.hpp>
++#include <lib/robust_height/RobustHeight.hpp>
+ #include <lib/slew_rate/SlewRate.hpp>
+ #include <lib/stick_yaw/StickYaw.hpp>
+ 
+@@ -93,6 +96,11 @@ private:
+ 
+ 	float throttle_curve(float throttle_stick_input);
+ 
++	/**
++	 * Cap the Stabilized collective thrust below the MPC_HAGL_MAX ceiling (distance sensor height)
++	 */
++	float limit_thrust_at_ceiling(float thrust, const matrix::Quatf &q, float dt);
++
+ 	/**
+ 	 * Generate & publish an attitude setpoint from stick inputs
+ 	 */
+@@ -106,6 +114,8 @@ private:
+ 	uORB::Subscription _hover_thrust_estimate_sub{ORB_ID(hover_thrust_estimate)};
+ 	uORB::Subscription _vehicle_attitude_setpoint_sub{ORB_ID(vehicle_attitude_setpoint)};
+ 	uORB::Subscription _autotune_attitude_control_status_sub{ORB_ID(autotune_attitude_control_status)};
++	uORB::Subscription _control_allocator_status_sub{ORB_ID(control_allocator_status)};
++	uORB::Subscription _failure_detector_status_sub{ORB_ID(failure_detector_status)};
+ 	uORB::Subscription _manual_control_setpoint_sub{ORB_ID(manual_control_setpoint)};
+ 	uORB::Subscription _vehicle_control_mode_sub{ORB_ID(vehicle_control_mode)};
+ 	uORB::Subscription _vehicle_land_detected_sub{ORB_ID(vehicle_land_detected)};
+@@ -131,6 +141,15 @@ private:
+ 	float _unaided_heading{NAN}; // initialized NAN to not distract heading lock when local position never published
+ 	float _man_tilt_max{0.f};			/**< maximum tilt allowed for manual flight [rad] */
+ 
++	RobustHeight _robust_height;			/**< distance sensor height without sudden jumps */
++	ArmedHeight _armed_height;			/**< height above the arming point, without a distance sensor */
++	float _vz{NAN};					/**< vertical velocity (down positive), NAN if invalid [m/s] */
++	float _ceiling_integral{0.f};			/**< climb-rate limiter integral [m/s^2] */
++	float _ceiling_hover{NAN};			/**< hover thrust the ceiling integral refers to */
++
++	bool _motor_failure_reported{false};		/**< the failure detector reports a motor failure */
++	uint16_t _motor_failure_handled_mask{0};	/**< motors the allocator has not fully brought back yet */
++
+ 	SlewRate<float> _manual_throttle_minimum{0.f}; ///< 0 when landed and ramped to MPC_MANTHR_MIN in air
+ 	SlewRate<float> _manual_throttle_maximum{0.f}; ///< 0 when disarmed ramped to 1 when spooled up
+ 	AlphaFilter<float> _man_roll_input_filter;
+@@ -172,6 +191,12 @@ private:
+ 		(ParamFloat<px4::params::MPC_THR_MAX>) _param_mpc_thr_max,
+ 		(ParamFloat<px4::params::MPC_THR_HOVER>) _param_mpc_thr_hover,
+ 		(ParamInt<px4::params::MPC_THR_CURVE>) _param_mpc_thr_curve,
++		(ParamFloat<px4::params::MPC_HAGL_MAX>) _param_mpc_hagl_max,
++		(ParamFloat<px4::params::MPC_Z_P>) _param_mpc_z_p,
++		(ParamFloat<px4::params::MPC_Z_VEL_MAX_UP>) _param_mpc_z_vel_max_up,
++		(ParamFloat<px4::params::MPC_Z_VEL_P_ACC>) _param_mpc_z_vel_p_acc,
++		(ParamFloat<px4::params::MPC_Z_VEL_I_ACC>) _param_mpc_z_vel_i_acc,
++		(ParamInt<px4::params::EKF2_RNG_CTRL>) _param_ekf2_rng_ctrl,
+ 
+ 		(ParamFloat<px4::params::COM_SPOOLUP_TIME>) _param_com_spoolup_time
+ 	)
+diff --git a/src/modules/mc_att_control/mc_att_control_main.cpp b/src/modules/mc_att_control/mc_att_control_main.cpp
+index 2c348799dc..08545bb5cc 100644
+--- a/src/modules/mc_att_control/mc_att_control_main.cpp
++++ b/src/modules/mc_att_control/mc_att_control_main.cpp
+@@ -46,6 +46,7 @@
+ #include "mc_att_control.hpp"
+ 
+ #include <drivers/drv_hrt.h>
++#include <lib/geo/geo.h>
+ #include <mathlib/math/Limits.hpp>
+ #include <mathlib/math/Functions.hpp>
+ #include <Sticks.hpp>
+@@ -141,6 +142,55 @@ MulticopterAttitudeControl::throttle_curve(float throttle_stick_input)
+ 	return math::min(thrust, _manual_throttle_maximum.getState());
+ }
+ 
++float
++MulticopterAttitudeControl::limit_thrust_at_ceiling(float thrust, const Quatf &q, float dt)
++{
++	// With MPC_HAGL_MAX set, the stick thrust is capped by a climb-rate limiter: at most MPC_Z_VEL_MAX_UP,
++	// tapering to zero at the ceiling, so in Stabilized the pilot can neither shoot up nor climb through it.
++	const float ceiling = _param_mpc_hagl_max.get();
++
++	if (!_vehicle_control_mode.flag_armed) {
++		_ceiling_integral = 0.f;
++		_ceiling_hover = NAN;
++	}
++
++	// Distance sensor height with sudden jumps (reflections while tilted) filtered out, or without a
++	// distance sensor (EKF2_RNG_CTRL 0) the estimated height above the arming point
++	const float height = (_param_ekf2_rng_ctrl.get() == 0) ? _armed_height.get() : _robust_height.get();
++
++	if (ceiling < FLT_EPSILON || !PX4_ISFINITE(height) || !PX4_ISFINITE(_vz)) {
++		return thrust;
++	}
++
++	// Allowed climb rate minus the measured one (vz is positive down)
++	const float climb_rate_max = math::min(_param_mpc_z_vel_max_up.get(), _param_mpc_z_p.get() * (ceiling - height));
++	const float climb_rate_error = climb_rate_max + _vz;
++	// When the hover thrust changes (e.g. the estimator becomes valid), rescale the integral so the
++	// thrust it already compensates stays the same, otherwise the correction would be applied twice
++	const float hover = _hover_thrust_slew_rate.getState();
++
++	if (PX4_ISFINITE(_ceiling_hover) && (_ceiling_hover > .01f) && (hover > .01f)) {
++		_ceiling_integral = math::constrain(CONSTANTS_ONE_G * (_ceiling_hover * (1.f + _ceiling_integral / CONSTANTS_ONE_G)
++						    / hover - 1.f), -.5f * CONSTANTS_ONE_G, .5f * CONSTANTS_ONE_G);
++	}
++
++	_ceiling_hover = hover;
++
++	const float acceleration = _param_mpc_z_vel_p_acc.get() * climb_rate_error + _ceiling_integral;
++	// Only the vertical component of the thrust lifts: scale the cap with the tilt (body z vs vertical)
++	const float cos_tilt = math::max(1.f - 2.f * (q(1) * q(1) + q(2) * q(2)), .5f);
++	const float thrust_cap = hover * (1.f + acceleration / CONSTANTS_ONE_G) / cos_tilt;
++
++	if (thrust <= thrust_cap) {
++		return thrust;
++	}
++
++	// While limiting, the integral corrects a wrong hover thrust so the vehicle settles at the ceiling
++	_ceiling_integral = math::constrain(_ceiling_integral + _param_mpc_z_vel_i_acc.get() * climb_rate_error * dt,
++					    -.5f * CONSTANTS_ONE_G, .5f * CONSTANTS_ONE_G);
++	return math::max(thrust_cap, _manual_throttle_minimum.getState());
++}
++
+ void
+ MulticopterAttitudeControl::generate_attitude_setpoint(const Quatf &q, float dt)
+ {
+@@ -206,7 +256,7 @@ MulticopterAttitudeControl::generate_attitude_setpoint(const Quatf &q, float dt)
+ 
+ 	q_sp.copyTo(attitude_setpoint.q_d);
+ 
+-	attitude_setpoint.thrust_body[2] = -throttle_curve(_manual_control_setpoint.throttle);
++	attitude_setpoint.thrust_body[2] = -limit_thrust_at_ceiling(throttle_curve(_manual_control_setpoint.throttle), q, dt);
+ 
+ 	attitude_setpoint.timestamp = hrt_absolute_time();
+ 	_vehicle_attitude_setpoint_pub.publish(attitude_setpoint);
+@@ -297,6 +347,28 @@ MulticopterAttitudeControl::Run()
+ 
+ 			if (_vehicle_local_position_sub.copy(&vehicle_local_position)) {
+ 				_unaided_heading = vehicle_local_position.unaided_heading;
++				_vz = vehicle_local_position.v_z_valid ? vehicle_local_position.vz : NAN;
++				_robust_height.update(vehicle_local_position.dist_bottom_valid ? vehicle_local_position.dist_bottom : NAN,
++						      _vz, vehicle_local_position.timestamp_sample);
++				_armed_height.update(vehicle_local_position.z, vehicle_local_position.z_valid,
++						     vehicle_local_position.z_reset_counter, vehicle_local_position.delta_z,
++						     _vehicle_control_mode.flag_armed);
++			}
++		}
++
++		if (_failure_detector_status_sub.updated()) {
++			failure_detector_status_s failure_detector_status;
++
++			if (_failure_detector_status_sub.copy(&failure_detector_status)) {
++				_motor_failure_reported = failure_detector_status.fd_motor;
++			}
++		}
++
++		if (_control_allocator_status_sub.updated()) {
++			control_allocator_status_s control_allocator_status;
++
++			if (_control_allocator_status_sub.copy(&control_allocator_status)) {
++				_motor_failure_handled_mask = control_allocator_status.handled_motor_failure_mask;
+ 			}
+ 		}
+ 
+@@ -314,6 +386,12 @@ MulticopterAttitudeControl::Run()
+ 			    !_vehicle_control_mode.flag_control_velocity_enabled &&
+ 			    !_vehicle_control_mode.flag_control_position_enabled) {
+ 
++				// While the allocator brings the motors back after a failure, keep locking the current heading:
++				// a heading the failed vehicle could not hold must not be snapped back to once authority returns
++				if (!_motor_failure_reported && _motor_failure_handled_mask != 0) {
++					_yaw_setpoint_stabilized = NAN;
++				}
++
+ 				generate_attitude_setpoint(q, dt);
+ 
+ 			} else {
+diff --git a/src/modules/mc_pos_control/multicopter_altitude_mode_params.yaml b/src/modules/mc_pos_control/multicopter_altitude_mode_params.yaml
+index 18030117bb..44678b2475 100644
+--- a/src/modules/mc_pos_control/multicopter_altitude_mode_params.yaml
++++ b/src/modules/mc_pos_control/multicopter_altitude_mode_params.yaml
+@@ -80,3 +80,21 @@ parameters:
+       min: 0
+       max: 3
+       decimal: 2
++    MPC_HAGL_MAX:
++      description:
++        short: Maximum height above ground in altitude and position mode
++        long: |-
++          Hard ceiling for the height above ground measured by the distance sensor,
++          enforced in Altitude and Position mode regardless of the throttle stick,
++          and in Stabilized by capping the thrust. Without a distance sensor
++          (EKF2_RNG_CTRL 0) the Stabilized cap uses the estimated height above the
++          arming point instead. The climb rate is limited to
++          MPC_Z_P * (MPC_HAGL_MAX - height) and the vehicle descends when it is above
++          the ceiling. Not applied while the height is unknown. 0 disables the ceiling.
++      type: float
++      default: 0.0
++      unit: m
++      min: 0
++      max: 100
++      decimal: 2
++      increment: 0.1
+diff --git a/src/modules/navigator/geofence.h b/src/modules/navigator/geofence.h
+index cd6678798c..ea97a54d8b 100644
+--- a/src/modules/navigator/geofence.h
++++ b/src/modules/navigator/geofence.h
+@@ -144,6 +144,7 @@ public:
+ 	int getGeofenceAction() { return _param_gf_action.get(); }
+ 
+ 	float getMaxHorDistanceHome() { return _param_gf_max_hor_dist.get(); }
++	float getMaxVerDistanceHome() { return _param_gf_max_ver_dist.get(); }
+ 
+ 	bool isHomeRequired();
+ 
+diff --git a/src/modules/navigator/geofence_params.yaml b/src/modules/navigator/geofence_params.yaml
+index 8d594b35fe..a73ed5cba1 100644
+--- a/src/modules/navigator/geofence_params.yaml
++++ b/src/modules/navigator/geofence_params.yaml
+@@ -19,6 +19,15 @@ parameters:
+       default: 2
+       min: 0
+       max: 5
++    GF_ACT_FORCE:
++      description:
++        short: Geofence action cannot be overridden
++        long: |-
++          If enabled, the Hold, Return or Land action triggered by a geofence violation
++          cannot be taken over with the sticks or the mode switch and is only cleared
++          by disarming (e.g. after landing or with the kill switch).
++      type: boolean
++      default: 0
+     GF_SOURCE:
+       description:
+         short: Geofence source
+diff --git a/src/modules/navigator/navigator.h b/src/modules/navigator/navigator.h
+index 1ee6f81ade..4554728b19 100644
+--- a/src/modules/navigator/navigator.h
++++ b/src/modules/navigator/navigator.h
+@@ -71,6 +71,7 @@
+ #include <uORB/topics/telemetry_status.h>
+ 
+ #include <lib/perf/perf_counter.h>
++#include <lib/robust_height/RobustHeight.hpp>
+ #include <px4_platform_common/events.h>
+ #include <px4_platform_common/module.h>
+ #include <px4_platform_common/module_params.h>
+@@ -328,6 +329,11 @@ public:
+ 
+ 	void geofence_breach_check();
+ 
++	/**
++	 * Max distance and height limits in the local frame, used when no global position is available.
++	 */
++	void local_geofence_breach_check();
++
+ 	// Param access
+ 	int get_loiter_min_alt() const { return _param_min_ltr_alt.get(); }
+ 	int get_landing_abort_min_alt() const { return _param_mis_lnd_abrt_alt.get(); }
+@@ -419,6 +425,10 @@ private:
+ 	Geofence	_geofence;			/**< class that handles the geofence */
+ 	hrt_abstime _last_geofence_check{0};
+ 	bool _geofence_reposition_sent{false};	/**< true if a reposition triplet has been sent for the current breach */
++	static constexpr hrt_abstime LOCAL_GF_ALT_CONFIRM{500_ms};	/**< local vertical limit must be exceeded this long */
++	hrt_abstime _local_gf_alt_breach_start{0};	/**< since when the local vertical limit is exceeded, 0 if not */
++	RobustHeight _local_gf_height;			/**< distance sensor height without sudden jumps, for the local fence */
++	ArmedHeight _local_gf_armed_height;		/**< height above the arming point, for the local fence without a distance sensor */
+ 	hrt_abstime _time_loitering_after_gf_breach{0};	/**< latches breach state while loitering, prevents reposition center walking */
+ #if CONFIG_NAVIGATOR_GEOFENCE_AVOIDANCE
+ 	GeofenceAvoidancePlanner _geofence_avoidance_planner; /**< Return path planner that routes around fences (visibility graph + Dijkstra) */
+@@ -513,6 +523,9 @@ private:
+ 		(ParamFloat<px4::params::MIS_YAW_TMT>)        _param_mis_yaw_tmt,
+ 		(ParamFloat<px4::params::MIS_YAW_ERR>)        _param_mis_yaw_err,
+ 		(ParamInt<px4::params::MIS_LND_ABRT_ALT>)     _param_mis_lnd_abrt_alt,
+-		(ParamFloat<px4::params::MIS_COMMAND_TOUT>) _param_mis_command_tout
++		(ParamFloat<px4::params::MIS_COMMAND_TOUT>) _param_mis_command_tout,
++
++		// non-navigator parameters: the local fence height source (0 = no distance sensor)
++		(ParamInt<px4::params::EKF2_RNG_CTRL>)      _param_ekf2_rng_ctrl
+ 	)
+ };
+diff --git a/src/modules/navigator/navigator_main.cpp b/src/modules/navigator/navigator_main.cpp
+index 9f860dd21c..560b51893b 100644
+--- a/src/modules/navigator/navigator_main.cpp
++++ b/src/modules/navigator/navigator_main.cpp
+@@ -1216,6 +1216,7 @@ void Navigator::geofence_breach_check()
+ 		}
+ 
+ 		if (!have_valid_position_for_breach_check) {
++			local_geofence_breach_check();
+ 			return;
+ 		}
+ 
+@@ -1287,6 +1288,62 @@ void Navigator::geofence_breach_check()
+ 	}
+ }
+ 
++void Navigator::local_geofence_breach_check()
++{
++	// Without a global position (e.g. indoors on optical flow) the checks above cannot run.
++	// Enforce GF_MAX_HOR_DIST against the horizontal distance from the local home position and
++	// GF_MAX_VER_DIST against the height above ground measured by the distance sensor, or without a
++	// distance sensor (EKF2_RNG_CTRL 0) against the estimated height above the arming point.
++	const float max_hor_dist = _geofence.getMaxHorDistanceHome();
++	const float max_ver_dist = _geofence.getMaxVerDistanceHome();
++
++	if (max_hor_dist <= FLT_EPSILON && max_ver_dist <= FLT_EPSILON) {
++		return;
++	}
++
++	const bool armed = _vstatus.arming_state == vehicle_status_s::ARMING_STATE_ARMED;
++	const hrt_abstime now = hrt_absolute_time();
++	bool max_dist_triggered = false;
++	bool max_alt_triggered = false;
++
++	if (max_hor_dist > FLT_EPSILON && _local_pos.xy_valid && _home_pos.valid_lpos) {
++		const float dist_xy = hypotf(_local_pos.x - _home_pos.x, _local_pos.y - _home_pos.y);
++		max_dist_triggered = dist_xy >= max_hor_dist;
++	}
++
++	if (max_ver_dist > FLT_EPSILON) {
++		// Distance sensor height with sudden jumps (reflections while tilted) filtered out
++		const float range_height = _local_gf_height.update(_local_pos.dist_bottom_valid ? _local_pos.dist_bottom : NAN,
++					   _local_pos.v_z_valid ? _local_pos.vz : NAN, _local_pos.timestamp_sample);
++		const float armed_height = _local_gf_armed_height.update(_local_pos.z, _local_pos.z_valid,
++					   _local_pos.z_reset_counter, _local_pos.delta_z, armed);
++		const float height = (_param_ekf2_rng_ctrl.get() == 0) ? armed_height : range_height;
++
++		// Height unknown in flight counts as a breach rather than letting the vehicle climb unchecked
++		const bool alt_exceeded = PX4_ISFINITE(height) ? (height >= max_ver_dist) : armed;
++
++		// A reflection or a lost return makes the distance sensor jump for a moment (e.g. when tilting),
++		// so the breach is only reported once it has lasted LOCAL_GF_ALT_CONFIRM
++		if (!alt_exceeded) {
++			_local_gf_alt_breach_start = 0;
++
++		} else if (_local_gf_alt_breach_start == 0) {
++			_local_gf_alt_breach_start = now;
++		}
++
++		max_alt_triggered = alt_exceeded && (now - _local_gf_alt_breach_start >= LOCAL_GF_ALT_CONFIRM);
++	}
++
++	_geofence_result.geofence_max_dist_triggered = max_dist_triggered;
++	_geofence_result.geofence_max_alt_triggered = max_alt_triggered;
++	_geofence_result.geofence_custom_fence_triggered = false;
++
++	_last_geofence_check = now;
++	_geofence_result.timestamp = now;
++	_geofence_result.geofence_action = _geofence.getGeofenceAction();
++	_geofence_result_pub.publish(_geofence_result);
++}
++
+ int Navigator::run_trampoline(int argc, char *argv[])
+ {
+ 	return ModuleBase::run_trampoline_impl(desc, [](int ac, char *av[]) -> ModuleBase * {
+diff --git a/src/modules/simulation/simulator_sih/sih.cpp b/src/modules/simulation/simulator_sih/sih.cpp
+index d9806eb9dd..a9496b6140 100644
+--- a/src/modules/simulation/simulator_sih/sih.cpp
++++ b/src/modules/simulation/simulator_sih/sih.cpp
+@@ -363,6 +363,7 @@ void Sih::parameters_updated()
+ 	_px4_rangefinder.set_max_distance(_distance_snsr_max);
+ 
+ 	_T_TAU = _sih_thrust_tau.get();
++	_T_START = _sih_thrust_start.get();
+ 
+ 	_v_wind_N = Vector3f(_sih_wind_n.get(), _sih_wind_e.get(), 0.f);
+ }
+@@ -380,6 +381,33 @@ void Sih::read_motors(const float dt)
+ 
+ 			} else {
+ 				float u_sp = actuators_out.output[i];
++
++				// A real ESC needs a while to start a stopped motor before it makes thrust, and reversing
++				// means stopping first: model that as a dead time SIH_T_START from standstill
++				if (_T_START > 0.f) {
++					const bool running = fabsf(_u[i]) > 0.02f;
++
++					if (running) {
++						_motor_start_time[i] = 0;
++
++						if (u_sp * _u[i] < 0.f) {
++							u_sp = 0.f;
++						}
++
++					} else if (fabsf(u_sp) > 0.02f) {
++						if (_motor_start_time[i] == 0) {
++							_motor_start_time[i] = actuators_out.timestamp;
++						}
++
++						if (actuators_out.timestamp - _motor_start_time[i] < (hrt_abstime)(_T_START * 1e6f)) {
++							u_sp = 0.f;
++						}
++
++					} else {
++						_motor_start_time[i] = 0;
++					}
++				}
++
+ 				_u[i] = _u[i] + dt / _T_TAU * (u_sp - _u[i]); // first order transfer function with time constant tau
+ 			}
+ 		}
+diff --git a/src/modules/simulation/simulator_sih/sih.hpp b/src/modules/simulation/simulator_sih/sih.hpp
+index 5e2ec4d85d..8183c86c27 100644
+--- a/src/modules/simulation/simulator_sih/sih.hpp
++++ b/src/modules/simulation/simulator_sih/sih.hpp
+@@ -265,6 +265,7 @@ private:
+ 	matrix::Vector3f _lpos{};  // position in a local tangent-plane frame [m]
+ 
+ 	float _u[NUM_ACTUATORS_MAX] {}; // thruster signals
++	hrt_abstime _motor_start_time[NUM_ACTUATORS_MAX] {}; // when a stopped motor was commanded to run, 0 if not starting
+ 	float       _T[NUM_DYN_THRUSTER] {};         // thruster forces (N)
+ 	float       _Q[NUM_DYN_THRUSTER] {};         // thruster torque (Nm)
+ 	Thruster    _thruster[NUM_DYN_THRUSTER] {};	// thruster objects
+@@ -307,7 +308,7 @@ private:
+ 	// parameters
+ 	MapProjection _lpos_ref{};
+ 	float _lpos_ref_alt;
+-	float _MASS, _T_MAX, _Q_MAX, _L_ROLL, _L_PITCH, _KDV, _KDW, _T_TAU, _F_T_MAX, _F_Q_MAX;
++	float _MASS, _T_MAX, _Q_MAX, _L_ROLL, _L_PITCH, _KDV, _KDW, _T_TAU, _T_START, _F_T_MAX, _F_Q_MAX;
+ 	matrix::Matrix3f _I;    // vehicle inertia matrix
+ 	matrix::Matrix3f _Im1;  // inverse of the inertia matrix
+ 
+@@ -340,6 +341,7 @@ private:
+ 		(ParamFloat<px4::params::SIH_DISTSNSR_MAX>) _sih_distance_snsr_max,
+ 		(ParamFloat<px4::params::SIH_DISTSNSR_OVR>) _sih_distance_snsr_override,
+ 		(ParamFloat<px4::params::SIH_T_TAU>) _sih_thrust_tau,
++		(ParamFloat<px4::params::SIH_T_START>) _sih_thrust_start,
+ 		// forward propeller
+ 		(ParamFloat<px4::params::SIH_F_T_MAX>) _sih_f_thrust_max,
+ 		(ParamFloat<px4::params::SIH_F_Q_MAX>) _sih_f_torque_max,
+diff --git a/src/modules/simulation/simulator_sih/sih_params.yaml b/src/modules/simulation/simulator_sih/sih_params.yaml
+index 716e2101b0..463dacb396 100644
+--- a/src/modules/simulation/simulator_sih/sih_params.yaml
++++ b/src/modules/simulation/simulator_sih/sih_params.yaml
+@@ -262,6 +262,14 @@ parameters:
+       type: float
+       default: 0.05
+       unit: s
++    SIH_T_START:
++      description:
++        short: thruster start-up dead time
++        long: Time a stopped thruster makes no thrust after being commanded to run, as an ESC
++          needs to start the motor. A reversal first spins down to standstill. 0 disables it.
++      type: float
++      default: 0.0
++      unit: s
+     SIH_VEHICLE_TYPE:
+       description:
+         short: Vehicle type

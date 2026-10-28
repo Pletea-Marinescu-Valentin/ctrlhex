@@ -1,0 +1,71 @@
+# CTRLHEX
+
+Fault-tolerant hexacopter flight through motor failures on PX4: firmware changes, flight data,
+simulation experiments and analysis scripts.
+
+## Contents
+
+| Path | What |
+|---|---|
+| `firmware/ctrlhex.patch` | Changes to PX4-Autopilot `main` at commit `729de5237b` |
+| `params/` | Full parameter sets of the two vehicles as flown |
+| `data/flights/` | Flight logs with commanded motor stops (ULog) |
+| `analysis/` | MATLAB: flight-log analysis and the restore simulation |
+| `sim/` | PX4 SIH experiments (scripts, parameter files, analysis) |
+| `results/figures/` | Figures produced by `analysis/` |
+
+## Firmware
+
+The patch adds, on top of the PX4 allocator (`CA_FAILURE_MODE 2`, reversible opposite rotor):
+
+- gradual motor restore (`CA_RESTORE_SPIN`, `CA_RESTORE_TIME`; both 0 = PX4 one-step restore)
+- opposite rotor stopped at ground contact in mode 2
+- failure injection from three three-position RC switches (`SYS_FAIL_RC_INSL`, `SYS_FAIL_RC2_*`, `SYS_FAIL_RC3_*`)
+- local geofence without global position, `GF_ACT_FORCE`, Stabilized-mode ceiling `MPC_HAGL_MAX`,
+  robust range height (`src/lib/robust_height`)
+- configurable kill-switch disarm delay `COM_KILL_DISARM`
+- motor dead time in SIH (`SIH_T_START`)
+- MicoAir H743 V2: motor outputs driven low at reset (PX4 issue #27696), 1-bit SD card,
+  `failinject` build variant
+
+```bash
+git clone https://github.com/PX4/PX4-Autopilot.git && cd PX4-Autopilot
+git checkout 729de5237b && git submodule update --init --recursive
+git apply /path/to/ctrlhex/firmware/ctrlhex.patch
+make micoair_h743-v2_failinject     # flight controller
+make px4_sitl_sih                   # simulation
+```
+
+Hardware: MicoAir H743 V2, two Sequre Blueson A2 65A AM32 4-in-1 ESCs (bidirectional DShot600 with
+extended telemetry, 3D mode), airframe 6001. Demonstrator: Readytosky 3115 900KV, 6S, MTF-01P flow and
+range sensor. Small hexacopter: Skystars KOKO 1505 3450KV, 3S, barometric height only.
+
+## Flight data
+
+```matlab
+cd analysis
+flight_analysis('demonstrator')      % 2026-10-21, 8 stops
+flight_analysis('small')             % 2026-10-14, 12 requests, 11 applied
+restore_simulation('demonstrator')   % one-step versus gradual restore
+restore_simulation('small')
+```
+
+MATLAB R2025b with the UAV Toolbox (`ulogreader`). The tilt error is the angle between the commanded
+and the measured body z axis; it includes the pilot's own manoeuvres.
+
+## Simulation
+
+Ubuntu 24.04, the patched `px4_sitl_sih` build, Python 3 with `pymavlink`, `pyulog`, `numpy`.
+
+```bash
+PX4_DIR=~/PX4-Autopilot bash sim/experiments.sh
+```
+
+Each run starts SIH (`sihsim_hex`), applies the parameter files in `sim/params`, flies a script from
+`sim/flights` and stores the log in `results/sih`; the summaries are written there as `summary_*.txt`.
+A single run: `bash sim/run_sih.sh <tag> "<script> [args]" [param files...]`.
+The PX4 baseline for the landing test is the same run on an unpatched build.
+
+## License
+
+BSD 3-Clause, as PX4.
