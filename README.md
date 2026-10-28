@@ -50,6 +50,7 @@ flight_analysis('small')             % 2026-10-14, 12 requests, 11 applied
 restore_simulation('demonstrator')   % one-step versus gradual restore
 restore_simulation('small')
 paper_figures                        % paper figures; needs the SIH logs in results/sih
+restore_study(100)                   % ablation, restore timing and Monte Carlo -> results/restore_study.txt
 ```
 
 MATLAB R2025b with the UAV Toolbox (`ulogreader`). The tilt error is the angle between the commanded

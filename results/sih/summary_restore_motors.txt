@@ -1,0 +1,108 @@
+
+=== motor1_gradual.ulg
+     29.57  [failure_injection_manager] Injected: motor off, instances 1
+     29.57  [control_allocator] Handling motor 0 failure (mode 2, mask 0x1)
+     35.38  [failure_injection_manager] Cleared: motor, instances 1
+     35.39  [control_allocator] Restoring motors (mask 0x1)
+     36.69  [control_allocator] All motors restored
+   motor fails at  29.57 s: roll   0.2  pitch   0.3  yaw   0.2 deg | rates p    3 q    3 r    2 deg/s | height -0.03/-0.00 m | hor speed 0.03 m/s
+   motor back  at  35.39 s: roll   1.5  pitch   2.4  yaw   0.8 deg | rates p   15 q   23 r    5 deg/s | height -0.02/+0.01 m | hor speed 0.07 m/s
+
+=== motor1_one_step.ulg
+     29.60  [failure_injection_manager] Injected: motor off, instances 1
+     29.60  [control_allocator] Handling motor 0 failure (mode 2, mask 0x1)
+     35.43  [failure_injection_manager] Cleared: motor, instances 1
+     35.44  [control_allocator] Restoring motors (mask 0x1)
+     35.44  [control_allocator] All motors restored
+   motor fails at  29.60 s: roll   0.1  pitch   0.3  yaw   0.2 deg | rates p    2 q    3 r    2 deg/s | height -0.03/-0.00 m | hor speed 0.02 m/s
+   motor back  at  35.44 s: roll   4.9  pitch   7.6  yaw   2.7 deg | rates p   39 q   61 r   13 deg/s | height -0.07/+0.02 m | hor speed 0.28 m/s
+
+=== motor2_gradual.ulg
+     29.50  [failure_injection_manager] Injected: motor off, instances 2
+     29.51  [control_allocator] Handling motor 1 failure (mode 2, mask 0x2)
+     35.26  [failure_injection_manager] Cleared: motor, instances 2
+     35.27  [control_allocator] Restoring motors (mask 0x2)
+     36.57  [control_allocator] All motors restored
+   motor fails at  29.51 s: roll   0.3  pitch   0.0  yaw   0.1 deg | rates p    3 q    2 r    2 deg/s | height -0.03/-0.00 m | hor speed 0.03 m/s
+   motor back  at  35.27 s: roll   0.4  pitch   0.0  yaw   0.3 deg | rates p    4 q    2 r    2 deg/s | height -0.01/+0.00 m | hor speed 0.03 m/s
+
+=== motor2_one_step.ulg
+     29.48  [failure_injection_manager] Injected: motor off, instances 2
+     29.49  [control_allocator] Handling motor 1 failure (mode 2, mask 0x2)
+     35.26  [failure_injection_manager] Cleared: motor, instances 2
+     35.28  [control_allocator] Restoring motors (mask 0x2)
+     35.28  [control_allocator] All motors restored
+   motor fails at  29.49 s: roll   0.2  pitch   0.0  yaw   0.1 deg | rates p    2 q    2 r    2 deg/s | height -0.03/-0.00 m | hor speed 0.03 m/s
+   motor back  at  35.27 s: roll   9.4  pitch   0.2  yaw   2.4 deg | rates p   74 q    2 r   12 deg/s | height -0.08/+0.01 m | hor speed 0.26 m/s
+
+=== motor3_gradual.ulg
+     29.50  [failure_injection_manager] Injected: motor off, instances 3
+     29.51  [control_allocator] Handling motor 2 failure (mode 2, mask 0x4)
+     35.30  [failure_injection_manager] Cleared: motor, instances 3
+     35.30  [control_allocator] Restoring motors (mask 0x4)
+     36.60  [control_allocator] All motors restored
+   motor fails at  29.51 s: roll   0.2  pitch   0.2  yaw   0.2 deg | rates p    3 q    3 r    2 deg/s | height -0.03/-0.00 m | hor speed 0.03 m/s
+   motor back  at  35.30 s: roll   0.6  pitch   0.9  yaw   0.4 deg | rates p    8 q   14 r    3 deg/s | height -0.01/+0.01 m | hor speed 0.04 m/s
+
+=== motor3_one_step.ulg
+     29.56  [failure_injection_manager] Injected: motor off, instances 3
+     29.57  [control_allocator] Handling motor 2 failure (mode 2, mask 0x4)
+     35.37  [failure_injection_manager] Cleared: motor, instances 3
+     35.38  [control_allocator] Restoring motors (mask 0x4)
+     35.38  [control_allocator] All motors restored
+   motor fails at  29.57 s: roll   0.2  pitch   0.2  yaw   0.2 deg | rates p    3 q    3 r    2 deg/s | height -0.03/-0.00 m | hor speed 0.04 m/s
+   motor back  at  35.38 s: roll   4.8  pitch   7.7  yaw   2.6 deg | rates p   38 q   61 r   13 deg/s | height -0.07/+0.02 m | hor speed 0.24 m/s
+
+=== motor4_gradual.ulg
+     29.51  [failure_injection_manager] Injected: motor off, instances 4
+     29.52  [control_allocator] Handling motor 3 failure (mode 2, mask 0x8)
+     35.28  [failure_injection_manager] Cleared: motor, instances 4
+     35.30  [control_allocator] Restoring motors (mask 0x8)
+     36.60  [control_allocator] All motors restored
+   motor fails at  29.52 s: roll   0.2  pitch   0.3  yaw   0.1 deg | rates p    2 q    4 r    2 deg/s | height -0.03/-0.00 m | hor speed 0.03 m/s
+   motor back  at  35.29 s: roll   0.3  pitch   0.4  yaw   0.4 deg | rates p    3 q    5 r    2 deg/s | height -0.01/+0.00 m | hor speed 0.03 m/s
+
+=== motor4_one_step.ulg
+     28.49  [failure_injection_manager] Injected: motor off, instances 4
+     28.50  [control_allocator] Handling motor 3 failure (mode 2, mask 0x8)
+     34.30  [failure_injection_manager] Cleared: motor, instances 4
+     34.31  [control_allocator] Restoring motors (mask 0x8)
+     34.31  [control_allocator] All motors restored
+   motor fails at  28.50 s: roll   0.2  pitch   0.3  yaw   0.2 deg | rates p    2 q    4 r    2 deg/s | height -0.04/-0.00 m | hor speed 0.03 m/s
+   motor back  at  34.31 s: roll   4.7  pitch   7.7  yaw   2.6 deg | rates p   39 q   61 r   13 deg/s | height -0.07/+0.01 m | hor speed 0.26 m/s
+
+=== motor5_gradual.ulg
+     29.48  [failure_injection_manager] Injected: motor off, instances 5
+     29.49  [control_allocator] Handling motor 4 failure (mode 2, mask 0x10)
+     35.27  [failure_injection_manager] Cleared: motor, instances 5
+     35.28  [control_allocator] Restoring motors (mask 0x10)
+     36.58  [control_allocator] All motors restored
+   motor fails at  29.49 s: roll   0.4  pitch   0.0  yaw   0.2 deg | rates p    4 q    2 r    2 deg/s | height -0.03/-0.00 m | hor speed 0.04 m/s
+   motor back  at  35.28 s: roll   4.4  pitch   0.0  yaw   1.0 deg | rates p   35 q    2 r    7 deg/s | height -0.04/+0.00 m | hor speed 0.11 m/s
+
+=== motor5_one_step.ulg
+     29.58  [failure_injection_manager] Injected: motor off, instances 5
+     29.59  [control_allocator] Handling motor 4 failure (mode 2, mask 0x10)
+     35.40  [failure_injection_manager] Cleared: motor, instances 5
+     35.41  [control_allocator] Restoring motors (mask 0x10)
+     35.41  [control_allocator] All motors restored
+   motor fails at  29.59 s: roll   0.2  pitch   0.0  yaw   0.2 deg | rates p    2 q    2 r    2 deg/s | height -0.03/-0.00 m | hor speed 0.04 m/s
+   motor back  at  35.41 s: roll   9.5  pitch   0.2  yaw   2.7 deg | rates p   75 q    2 r   14 deg/s | height -0.08/+0.02 m | hor speed 0.30 m/s
+
+=== motor6_gradual.ulg
+     29.46  [failure_injection_manager] Injected: motor off, instances 6
+     29.48  [control_allocator] Handling motor 5 failure (mode 2, mask 0x20)
+     35.23  [failure_injection_manager] Cleared: motor, instances 6
+     35.23  [control_allocator] Restoring motors (mask 0x20)
+     36.53  [control_allocator] All motors restored
+   motor fails at  29.47 s: roll   0.1  pitch   0.2  yaw   0.2 deg | rates p    2 q    2 r    2 deg/s | height -0.03/-0.00 m | hor speed 0.03 m/s
+   motor back  at  35.23 s: roll   0.3  pitch   0.5  yaw   0.3 deg | rates p    4 q    6 r    2 deg/s | height -0.01/+0.00 m | hor speed 0.04 m/s
+
+=== motor6_one_step.ulg
+     29.45  [failure_injection_manager] Injected: motor off, instances 6
+     29.46  [control_allocator] Handling motor 5 failure (mode 2, mask 0x20)
+     35.22  [failure_injection_manager] Cleared: motor, instances 6
+     35.23  [control_allocator] Restoring motors (mask 0x20)
+     35.23  [control_allocator] All motors restored
+   motor fails at  29.46 s: roll   0.1  pitch   0.2  yaw   0.1 deg | rates p    3 q    3 r    2 deg/s | height -0.03/-0.00 m | hor speed 0.03 m/s
+   motor back  at  35.23 s: roll   4.9  pitch   7.6  yaw   2.4 deg | rates p   39 q   61 r   12 deg/s | height -0.07/+0.02 m | hor speed 0.30 m/s

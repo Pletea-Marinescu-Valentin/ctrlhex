@@ -1,4 +1,4 @@
-function [T, Rstep, Rgrad, S] = restore_simulation(vehicle, saveFigures)
+function [T, Rstep, Rgrad, S] = restore_simulation(vehicle, saveFigures, opts)
 % Hexacopter X with motor 1 stopped at 2 s and released at 7 s: PX4 one-step restore versus the gradual
 % restore (CA_RESTORE_SPIN, CA_RESTORE_TIME). Rigid body with 6 DOF, motors with dead time and time
 % constant, PX4 attitude/rate cascade, PX4 pseudo-inverse allocation with sequential desaturation,
@@ -6,11 +6,15 @@ function [T, Rstep, Rgrad, S] = restore_simulation(vehicle, saveFigures)
 %   T = restore_simulation('demonstrator')
 %   T = restore_simulation('small')
 %   [T, Rstep, Rgrad, S] = restore_simulation(...)   also the trajectories and the scenario timing
+%   T = restore_simulation(vehicle, false, opts)     one study case, no figures or printout; opts may set
+%       spin, blend (restore times), tStart (motor dead time), cg, dT (asymmetries), seed (gyro noise),
+%       variant ('both' = column and output scaled, 'column', 'output') and idleComp (idle thrust in the allocation)
 % From the flight logs: hover command, attitude and rate gains, gyro filter, idle command.
 % Mass, arm, inertia and motor times are estimates.
 
 if nargin < 1, vehicle = 'demonstrator'; end
 if nargin < 2, saveFigures = true; end
+if nargin < 3, opts = struct(); end
 
 switch vehicle
     case 'demonstrator'                 % 3115 900KV, 10" propellers, 6S
@@ -42,6 +46,16 @@ C.zP = 1.0; C.zVelP = 4.0; C.zVelI = 2.0;
 
 S.h0 = 1.0; S.tStop = 2.0; S.tRelease = 7.0; S.tEnd = 11.0;
 S.spin = 0.3; S.blend = 1.0;
+S.variant = 'both'; S.idleComp = false; S.seed = 7;
+for f = reshape(intersect(fieldnames(opts), {'spin', 'blend', 'variant', 'idleComp', 'seed'}), 1, []), S.(f{1}) = opts.(f{1}); end
+for f = reshape(intersect(fieldnames(opts), {'tStart', 'cg', 'dT'}), 1, []), D.(f{1}) = opts.(f{1}); end
+
+if ~isempty(fieldnames(opts))
+    Rstep = simulate(D, C, S, false);
+    Rgrad = simulate(D, C, S, true);
+    T = [restore_peaks(Rstep, S); restore_peaks(Rgrad, S)];
+    return
+end
 
 root = fileparts(fileparts(mfilename('fullpath')));
 outDir = fullfile(root, 'results', 'figures', vehicle);
@@ -115,6 +129,12 @@ fprintf('after the restore (7-10 s):\n');
 disp(T);
 end
 
+function p = restore_peaks(R, S)
+% [max |roll| deg, max |roll rate| deg/s, max |lateral speed| m/s] in the 3 s after the release
+k = R.t >= S.tRelease & R.t <= S.tRelease + 3;
+p = [max(abs(R.eul(k, 1))), max(abs(R.w(k, 1))), max(abs(R.v(k, 2)))];
+end
+
 function R = simulate(D, C, S, gradual)
 % 6 s of settling before t = 0 so the integrators absorb the asymmetries; recording starts at t = 0
 dt = 1e-3; tSettle = 6; N = round((S.tEnd + tSettle) / dt); g = 9.81;
@@ -133,7 +153,9 @@ M = pinv(B) ./ scale;
 p = [0; 0; -S.h0]; v = zeros(3, 1); q = [1; 0; 0; 0]; w = zeros(3, 1);
 uAct = D.hover * ones(6, 1); tStart = NaN(6, 1);
 rateInt = zeros(3, 1); zInt = 0; wF = w; wFPrev = w;
-rng(7);
+rng(S.seed);
+colScaled = ~strcmp(S.variant, 'output');     % effectiveness column of the restored motor scaled by s
+outScaled = ~strcmp(S.variant, 'column');     % its output scaled by s
 aGyro = 2 * pi * 80 * dt / (1 + 2 * pi * 80 * dt);       % IMU_GYRO_CUTOFF 80 Hz
 active = true(6, 1); reversible = false(6, 1);
 sRest = 1; restoring = false; tLastUpdate = -1;
@@ -153,7 +175,7 @@ for n = 1:N
         active(1) = true;
         if gradual
             restoring = true; sRest = 0; tLastUpdate = -1;
-            M = pinv(B .* [0 1 1 1 1 1]) ./ scale;
+            M = pinv(B .* [~colScaled 1 1 1 1 1]) ./ scale;
         else
             reversible(:) = false; M = pinv(B) ./ scale;
         end
@@ -165,7 +187,7 @@ for n = 1:N
             restoring = false; sRest = 1; reversible(:) = false; M = pinv(B) ./ scale;
         elseif s > sRest && t - tLastUpdate >= 0.01 - 1e-9
             sRest = s; tLastUpdate = t;
-            M = pinv(B .* [sRest 1 1 1 1 1]) ./ scale;
+            if colScaled, M = pinv(B .* [sRest 1 1 1 1 1]) ./ scale; end
         end
     end
 
@@ -188,9 +210,13 @@ for n = 1:N
 
     lo = zeros(6, 1); lo(reversible) = -1; hi = ones(6, 1);
     lo(~active) = 0; hi(~active) = 0;
-    u = allocate(M, [tau; T], lo, hi);
+    c = [tau; T];
+    % idle compensation: the restored motor's idle thrust, faded out with s, is a known part of the wrench
+    idleShare = 0;
+    if restoring && S.idleComp, idleShare = (1 - sRest) * D.idle; c = c - scale' .* B(:, 1) * idleShare; end
+    u = allocate(M, c, lo, hi);
     uOut = u;
-    if restoring, uOut(1) = sRest * u(1); end
+    if restoring && outScaled, uOut(1) = idleShare + sRest * u(1); end
     uOut(~active) = 0;
 
     for i = 1:6

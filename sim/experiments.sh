@@ -25,6 +25,12 @@ run restore_stab_one_step "restore.py 2 stab"  $BASE $P/stabilized_ceiling.txt $
 run restore_stab_gradual  "restore.py 2 stab"  $BASE $P/stabilized_ceiling.txt
 run restore_again         "restore.py 2 again" $BASE
 
+# The same restore for every motor
+for mo in 1 2 3 4 5 6; do
+  run motor${mo}_one_step "restore.py $mo alt" $BASE $P/restore_one_step.txt
+  run motor${mo}_gradual  "restore.py $mo alt" $BASE
+done
+
 # Landing with a stopped motor in mode 2, three plant models
 for m in nominal fast slow; do
   run landing_$m "landing.py keep" $P/model_$m.txt $P/gains_selected.txt $P/safety.txt
@@ -41,6 +47,7 @@ for t in mode1 mode2; do
 done > "$OUT/summary_maneuvers.txt"
 python3 gains.py "$OUT" gains_{board,px4,selected}_{nominal,fast,slow} > "$OUT/summary_gains.txt"
 python3 restore.py "$OUT"/restore_*.ulg > "$OUT/summary_restore.txt"
+python3 restore.py "$OUT"/motor?_*.ulg > "$OUT/summary_restore_motors.txt"
 python3 landing.py "$OUT"/landing_*.ulg > "$OUT/summary_landing.txt"
 (cd "$OUT" && grep -H "max height\|Geofence\|Landing" ceiling_no_range.txt geofence_no_range.txt) > "$OUT/summary_safety.txt"
 echo "summaries in $OUT"

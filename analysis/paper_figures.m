@@ -14,7 +14,6 @@ flight_figure(Ld, outDir);
 stop_figure(Ld, rd, outDir);
 every_stop_figure({rd, rs}, {Sd, Ss}, {'Large hexacopter', 'Small hexacopter'}, outDir);
 sih_restore_figure(fullfile(root, 'results', 'sih'), outDir);
-model_restore_figure(outDir);
 close all
 fprintf('paper figures in %s\n', outDir);
 end
@@ -163,28 +162,6 @@ for k = 1:3, paper_axes(ax(k)); xlim(ax(k), [-0.5 2.5]); end
 ax(1).XTickLabel = {}; ax(2).XTickLabel = {};
 linkaxes(ax, 'x');
 save_figure(f, outDir, 'sih_restore', true);
-end
-
-%% MATLAB model of both vehicles: roll after the restore, one-step against gradual
-function model_restore_figure(outDir)
-f = paper_figure(3.5, 2.5);
-tl = tiledlayout(f, 2, 1, 'TileSpacing', 'compact', 'Padding', 'compact');
-names = {'demonstrator', 'Large hexacopter (model)'; 'small', 'Small hexacopter (model)'};
-for v = 1:2
-    [~, Rstep, Rgrad, S] = restore_simulation(names{v, 1}, false);
-    ax = nexttile(tl); hold(ax, 'on');
-    xregion(ax, 0, S.spin + S.blend, 'FaceColor', palette().ink2, 'FaceAlpha', 0.07, 'HandleVisibility', 'off');
-    h = [plot(ax, Rstep.t - S.tRelease, Rstep.eul(:, 1), 'Color', palette().orange, 'LineWidth', 1), ...
-         plot(ax, Rgrad.t - S.tRelease, Rgrad.eul(:, 1), 'Color', palette().blue, 'LineWidth', 1)];
-    ylabel(ax, 'Roll (deg)');
-    title(ax, names{v, 2}, 'FontWeight', 'normal');
-    if v == 1, paper_legend(ax, h, {'one-step restore (PX4)', 'gradual restore'}, 'northeast'); end
-    paper_axes(ax); xlim(ax, [-0.5 3]);
-    k = Rstep.t - S.tRelease >= -0.5 & Rstep.t - S.tRelease <= 3;
-    headroom(ax, [Rstep.eul(k, 1); Rgrad.eul(k, 1)]);
-end
-xlabel(tl, 'Time from the restore command (s)', 'FontName', 'Times New Roman', 'FontSize', 8, 'Color', palette().ink2);
-save_figure(f, outDir, 'model_restore', true);
 end
 
 function G = read_sih(file)
